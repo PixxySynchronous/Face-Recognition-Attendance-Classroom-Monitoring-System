@@ -1,0 +1,15 @@
+Flask==3.0.0
+gunicorn
+python-dotenv
+numpy
+Pillow
+opencv-python-headless
+ultralytics
+insightface
+torch
+torchvision
+
+# Note: heavy ML packages (torch, torchvision, insightface, ultralytics)
+# may require specific wheels or system libraries and can fail on
+# ephemeral platforms. Consider using a Dockerfile or deploying to
+# a VM for reliable builds.
