@@ -8,25 +8,26 @@ An AI-powered classroom engagement and attendance monitoring system with a brows
 
 | Tab | Function |
 |---|---|
-| **Classroom Monitoring** | Upload a classroom video → detect and track every student → classify engagement every 30 seconds using a fine-tuned 3D CNN → per-student timeline with clips |
+| **Classroom Monitoring** | Upload a classroom video → detect and track every student → classify engagement using EAR, MAR, YOLO-pose, gaze and emotion signals → per-student timeline with clips |
 | **Attendance** | Enroll students from photos/videos → mark attendance from a classroom photo using face recognition |
 
 ---
 
-## Activity Classification Model
+## Classroom Monitoring — Pipeline
 
-Evaluated on 176 labeled student clips — binary: **high engagement** vs **low engagement**.
+The **Classroom pipeline** (`CLASSROOM PIPELINE/classroom_pipeline.py`) uses the following signals per student per window:
 
-| Model | Accuracy | High Engage F1 | Macro F1 |
-|---|---|---|---|
-| **3D CNN R3D-18 (class-weighted)** | **93.2%** | **79.3%** | **87.6%** |
-
-The pipeline classifies 6 fine-grained behaviours into two categories:
-
-| Fine-grained label | Binary label |
+| Signal | How |
 |---|---|
-| Attentive | High engagement |
-| Talking, Head down, Head side, Distracted, On phone | Low engagement |
+| **EAR** (Eye Aspect Ratio) | dlib 68-pt landmarks → eyes open/closed, blink detection |
+| **MAR** (Mouth Aspect Ratio) | dlib 68-pt landmarks → talking detection |
+| **Head pose / gaze** | solvePnP on dlib landmarks → looking centre / left / right / up / down |
+| **Body keypoints** | YOLOv8-pose → head state, posture, motion |
+| **Phone detection** | YOLO → on phone → immediately low engagement |
+| **Emotion** | DeepFace → happy / neutral / surprise / sad / angry |
+| **Face re-ID** | InsightFace embeddings + seat-position tracking across windows |
+
+Actions classified per student: **Attentive / Writing / Talking / On Phone / Sleeping / Distracted**
 
 ---
 
@@ -35,34 +36,32 @@ The pipeline classifies 6 fine-grained behaviours into two categories:
 ### Detection & recognition model
 **InsightFace `antelopev2`** — SCRFD-10G face detector + GLinT-R100 recogniser (ResNet-100, Glint360K, 512-d L2-normalised embeddings), running at det_size=1280×1280
 
-> Note: the underlying `utils/retinaface_detector.py` also contains a **SAHI + MTCNN + buffalo_l** wrapper (`build_face_analysis_with_retinaface_detector`) used by the classroom and cognitive pipelines for better small-face recall. The attendance module currently uses the plain antelopev2 detector.
+> `utils/retinaface_detector.py` also contains a **SAHI + MTCNN + buffalo_l** wrapper used by the classroom and cognitive pipelines for better small-face recall.
 
 ### How enrollment works
 
-1. Upload a close-up photo/video of the student (or paste a local folder path for multiple clips)
-2. Sample **1 frame per second** from the video (up to 30 frames)
-3. **Anchor-based tracking** — the first detected face becomes the identity anchor; subsequent frames are only accepted if cosine similarity to anchor ≥ 0.35. This prevents multi-person videos from mixing identities.
+1. Upload a close-up photo/video (or paste a local folder path for multiple clips)
+2. Sample **1 frame per second** (up to 30 frames)
+3. **Anchor-based tracking** — first detected face is the identity anchor; subsequent frames accepted only if cosine similarity ≥ 0.35 (prevents multi-person videos from mixing identities)
 4. For each accepted frame, generate **4 embeddings**:
    - Original quality
-   - Degraded to **28 px** absolute width (INTER_AREA → Gaussian σ=1 → JPEG q50 → bicubic up)
+   - Degraded to **28 px** (INTER_AREA → Gaussian σ=1 → JPEG q50 → bicubic up)
    - Degraded to **36 px**
    - Degraded to **44 px**
-5. All embeddings stored in the gallery + a weighted-mean prototype computed
+5. All embeddings stored + weighted-mean prototype computed
 
-> The degraded variants bridge the domain gap between close-up enrollment (140–230 px face) and distant classroom faces (14–50 px).
+> Degraded variants bridge the domain gap between close-up enrollment (140–230 px face) and distant classroom faces (14–50 px).
 
 ### How attendance marking works
 
 1. Upload a classroom photo
-2. Detect all faces using SCRFD at 1280×1280
-3. For each detected face, extract a 512-d embedding
-4. For each enrolled student, compute:
-   `similarity = max(cosine vs prototype, max cosine vs all stored embeddings)`
-5. If best similarity ≥ **0.38** → recognized
-6. If two faces both match the same student, only the highest-scoring face gets the name — others stay Unknown
+2. Detect all faces (SCRFD 1280×1280)
+3. For each face: `similarity = max(cosine vs prototype, max cosine vs all stored embeddings)`
+4. If best similarity ≥ **0.38** → recognized
+5. Only the highest-scoring face per student gets the name label
 
 ### Re-enrollment
-Re-enrolling a student with the same name **adds** new embeddings to their existing gallery — does not overwrite. Useful for adding classroom-condition clips on top of selfie enrollment.
+Re-enrolling the same name **adds** embeddings to the existing gallery — does not overwrite.
 
 ---
 
@@ -91,13 +90,12 @@ See [`deployment/README.md`](deployment/README.md) for full Railway deployment i
 ## Repository Structure
 
 ```
-ACTIVITY CLASSIFICATION PIPELINE/   3D CNN engagement classifier
-CLASSROOM PIPELINE/                  Main classroom analysis pipeline
+CLASSROOM PIPELINE/                  Main classroom analysis pipeline (EAR/MAR/YOLO/emotion)
 ENGAGEMENT PIPELINE/                 YOLOv8-pose engagement signals
 COGNITIVE PIPELINE/                  EAR / gaze / emotion (dlib + DeepFace)
 COMBINED PIPELINE/                   Merged engagement + cognitive
 activity_web/                        Flask web app (2 tabs: Classroom + Attendance)
-utils/                               SAHI face detection wrapper
+utils/                               SAHI + MTCNN + buffalo_l face detection wrapper
 Activity monitoring/models/          Trained model weights
 deployment/                          Self-contained Railway deployment build
 ```
