@@ -216,9 +216,13 @@ h1 {
   color: var(--muted);
 }
 
-.demo-btn {
+.demo-btn-row {
+  display: flex;
+  gap: 8px;
   margin-top: 8px;
-  width: 100%;
+}
+.demo-btn {
+  flex: 1;
   background: transparent;
   border: 1.5px dashed #6366f1;
   color: #6366f1;
