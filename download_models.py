@@ -37,25 +37,29 @@ def _is_lfs_pointer(path: Path) -> bool:
         return False
 
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path, retries: int = 5) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
-    print(f"  downloading {dest.name} …", end="", flush=True)
 
     def _progress(count, block, total):
         if total > 0:
             pct = min(count * block * 100 // total, 100)
             print(f"\r  downloading {dest.name} … {pct}%", end="", flush=True)
 
-    try:
-        urllib.request.urlretrieve(url, tmp, _progress)
-        tmp.rename(dest)
-        size_mb = dest.stat().st_size / 1e6
-        print(f"\r  {dest.name} — {size_mb:.1f} MB  ✓")
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        print(f"\r  FAILED: {dest.name} — {exc}")
-        sys.exit(1)
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"  downloading {dest.name} … (attempt {attempt}/{retries})", end="", flush=True)
+            urllib.request.urlretrieve(url, tmp, _progress)
+            tmp.rename(dest)
+            size_mb = dest.stat().st_size / 1e6
+            print(f"\r  {dest.name} — {size_mb:.1f} MB  ✓")
+            return
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            print(f"\r  attempt {attempt} failed: {exc}")
+            if attempt == retries:
+                print(f"  FAILED after {retries} attempts: {dest.name}")
+                sys.exit(1)
 
 
 def main() -> None:
