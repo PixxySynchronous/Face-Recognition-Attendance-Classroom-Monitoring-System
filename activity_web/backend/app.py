@@ -379,7 +379,9 @@ def serve_attendance_artifact(filename: str):
     if not artifact_path.exists() or not artifact_path.is_file():
         return jsonify({"ok": False, "error": "Artifact not found."}), 404
 
-    return send_file(artifact_path, as_attachment=False, download_name=artifact_path.name)
+    suffix = artifact_path.suffix.lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(suffix.lstrip("."), "image/jpeg")
+    return send_file(artifact_path, mimetype=mime)
 
 
 @app.post("/api/combined/process")
