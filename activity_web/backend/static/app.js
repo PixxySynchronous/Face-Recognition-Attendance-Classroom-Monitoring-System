@@ -230,6 +230,15 @@ markForm.addEventListener("submit", async (event) => {
   } finally { btn.disabled = false; }
 });
 
+document.getElementById("demo-preview-btn").addEventListener("click", () => {
+  markStatus.classList.remove("error");
+  markStatus.textContent = "Demo classroom photo — original, no annotations.";
+  markedPhotoPreview.src = "/static/demo_classroom.jpg";
+  markResult.classList.remove("hidden");
+  recognizedList.innerHTML = "";
+  attendanceLogList.innerHTML = "";
+});
+
 document.getElementById("demo-btn").addEventListener("click", async () => {
   const btn = document.getElementById("demo-btn");
   btn.disabled = true;
