@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PRISM AI — Classroom Monitoring</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">PRISM AI</p>
+        <h1>Classroom Monitoring System</h1>
+        <p class="lede">
+          Analyse classroom videos to track per-student engagement using YOLOv8-pose, EAR/MAR signals, head-pose estimation, optical flow, and DeepFace emotion — and mark attendance from a single classroom photo using InsightFace recognition.
+        </p>
+      </section>
+
+      <section class="tabs-shell">
+        <div class="tabs-bar" role="tablist" aria-label="Workspace tabs">
+          <button class="tab-button active" type="button" data-tab-target="classroom-tab" aria-selected="true">Classroom Monitoring</button>
+          <button class="tab-button" type="button" data-tab-target="attendance-tab" aria-selected="false">Attendance</button>
+        </div>
+
+        <!-- Classroom tab — runs ClassroomPipeline -->
+        <section id="classroom-tab" class="panel tab-panel">
+          <form id="classroom-form" class="upload-form">
+            <label class="file-drop">
+              <input id="classroom-video-input" name="video" type="file" accept="video/*" />
+              <span id="classroom-file-label">Choose a classroom video (up to 60 min)</span>
+            </label>
+            <button type="submit">Analyse classroom</button>
+          </form>
+
+          <div id="classroom-status" class="status">Ready.</div>
+
+          <div id="classroom-results" class="results hidden">
+            <div class="metrics" id="classroom-metrics"></div>
+            <div class="downloads">
+              <a id="classroom-summary-link" href="#" target="_blank" rel="noreferrer">Download summary JSON</a>
+              <a id="classroom-csv-link" href="#" target="_blank" rel="noreferrer">Download CSV</a>
+            </div>
+            <div id="classroom-class-bar" class="cls-attention-bar"></div>
+            <div id="classroom-students" class="cls-students"></div>
+          </div>
+        </section>
+
+        <section id="attendance-tab" class="panel tab-panel hidden">
+          <div class="attendance-grid">
+            <article class="attendance-card">
+              <div class="attendance-card-header">
+                <h2>Enroll student</h2>
+                <p>Upload one or more photos or a short video to create the student embedding profile.</p>
+              </div>
+
+              <form id="enroll-form" class="stack-form">
+                <label class="field-label">
+                  Student name
+                  <input id="student-name-input" name="student_name" type="text" placeholder="Jane Doe" required />
+                </label>
+
+                <div style="display:flex;gap:8px;margin-bottom:4px;">
+                  <button type="button" id="tab-files" class="tab-btn tab-active" onclick="switchEnrollTab('files')">Upload files</button>
+                  <button type="button" id="tab-folder" class="tab-btn" onclick="switchEnrollTab('folder')">From folder path</button>
+                </div>
+
+                <div id="enroll-tab-files">
+                  <label class="file-drop file-drop-compact">
+                    <input id="enroll-media-input" name="media" type="file" accept="image/*,video/*" multiple />
+                    <span id="enroll-media-label">Choose photos or videos for enrollment</span>
+                  </label>
+                </div>
+
+                <div id="enroll-tab-folder" style="display:none;">
+                  <label class="field-label">
+                    Folder path (local path to a folder of videos)
+                    <input id="enroll-folder-input" type="text" placeholder="/Users/you/jai_clips" style="font-family:monospace;" />
+                  </label>
+                  <small style="color:#888;">All .mp4 .mov .avi .mkv .webm .jpg .png files in the folder will be used.</small>
+                </div>
+
+                <button type="submit">Enroll student</button>
+              </form>
+
+              <div id="enroll-status" class="status">Ready to enroll.</div>
+              <div id="enroll-result" class="attendance-result hidden"></div>
+            </article>
+
+            <article class="attendance-card">
+              <div class="attendance-card-header">
+                <h2>Mark attendance</h2>
+                <p>Upload a classroom photo and match all detected faces against the enrolled roster.</p>
+              </div>
+
+              <form id="mark-form" class="stack-form">
+                <label class="file-drop file-drop-compact">
+                  <input id="classroom-photo-input" name="photo" type="file" accept="image/*,video/*" required />
+                  <span id="classroom-photo-label">Choose a classroom photo</span>
+                </label>
+
+                <button type="submit">Mark attendance</button>
+              </form>
+
+              <button id="demo-btn" class="demo-btn">Run demo image</button>
+
+              <div id="mark-status" class="status">Ready to mark attendance.</div>
+              <div id="mark-result" class="attendance-result hidden">
+                <img id="marked-photo-preview" class="marked-photo-preview" alt="Marked classroom photo" />
+                <div id="recognized-list" class="result-list"></div>
+                <div id="attendance-log-list" class="result-list"></div>
+              </div>
+            </article>
+
+            <article class="attendance-card attendance-card-wide">
+              <div class="attendance-card-header">
+                <h2>Enrolled students</h2>
+                <p>Current roster loaded from the enrolled embeddings; face detection uses the fine-tuned RetinaFace ONNX model.</p>
+              </div>
+
+              <div id="roster-list" class="roster-list"></div>
+              <div id="attendance-log-summary" class="result-list"></div>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <!-- Lightbox modal for full-screen photo view -->
+    <div id="photo-lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+      <button class="lightbox-close" id="lightbox-close" aria-label="Close">&times;</button>
+      <img id="lightbox-img" class="lightbox-img" alt="Full-screen marked photo" />
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

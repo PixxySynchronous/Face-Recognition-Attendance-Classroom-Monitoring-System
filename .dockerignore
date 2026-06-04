@@ -1,0 +1,12 @@
+activity_web/runtime
+ACTIVITY CLASSIFICATION PIPELINE/outputs
+Student faces clips
+*.pt
+*.ckpt
+*.pth
+*.mp4
+*.mov
+*.avi
+.venv
+__pycache__
+.git

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://railway.app/schema.json",
+  "build": {
+    "builder": "dockerfile",
+    "dockerfile": "./Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "gunicorn --bind 0.0.0.0:$PORT activity_web.backend.app:app",
+    "restartPolicyType": "unless_stopped",
+    "healthchecks": {
+      "web": {
+        "enabled": true,
+        "interval": 10,
+        "timeout": 5,
+        "method": "GET",
+        "path": "/"
+      }
+    }
+  },
+  "variables": {
+    "ACTIVITY_WEB_RUNTIME_DIR": {
+      "description": "Runtime directory for uploads, outputs, and attendance data",
+      "value": "/data/activity_runtime"
+    },
+    "PYTHONUNBUFFERED": {
+      "description": "Ensure Python output is sent straight to logs",
+      "value": "1"
+    },
+    "PORT": {
+      "description": "Server port",
+      "value": "8080"
+    }
+  },
+  "plugins": [
+    "python@1.0.0"
+  ]
+}
