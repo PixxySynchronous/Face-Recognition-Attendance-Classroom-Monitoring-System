@@ -12,11 +12,9 @@ import numpy as np
 
 from insightface.app import FaceAnalysis
 from .startup import ensure_insightface_models_flat
+from .config import ATTENDANCE_DIR
 
 
-BACKEND_DIR = Path(__file__).resolve().parent
-RUNTIME_DIR = BACKEND_DIR.parent / "runtime"
-ATTENDANCE_DIR = RUNTIME_DIR / "attendance"
 UPLOAD_DIR = ATTENDANCE_DIR / "uploads"
 MARKED_DIR = ATTENDANCE_DIR / "marked"
 STORE_PATH = ATTENDANCE_DIR / "attendance_store.json"
