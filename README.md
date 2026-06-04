@@ -21,6 +21,47 @@ Evaluated on 176 labeled student clips — binary: **high engagement** vs **low 
 |---|---|---|---|
 | **3D CNN R3D-18 (class-weighted)** | **93.2%** | **79.3%** | **87.6%** |
 
+The pipeline classifies 6 fine-grained behaviours into two categories:
+
+| Fine-grained label | Binary label |
+|---|---|
+| Attentive | High engagement |
+| Talking, Head down, Head side, Distracted, On phone | Low engagement |
+
+---
+
+## Attendance — Face Recognition System
+
+### Detection model
+**InsightFace `antelopev2`** — SCRFD detector + GLinT-R100 recogniser (ResNet-100, Glint360K, 512-d L2-normalised embeddings)
+
+### How enrollment works
+
+1. Upload a close-up photo/video of the student (or paste a local folder path for multiple clips)
+2. Sample **1 frame per second** from the video (up to 30 frames)
+3. **Anchor-based tracking** — the first detected face becomes the identity anchor; subsequent frames are only accepted if cosine similarity to anchor ≥ 0.35. This prevents multi-person videos from mixing identities.
+4. For each accepted frame, generate **4 embeddings**:
+   - Original quality
+   - Degraded to **28 px** absolute width (INTER_AREA → Gaussian σ=1 → JPEG q50 → bicubic up)
+   - Degraded to **36 px**
+   - Degraded to **44 px**
+5. All embeddings stored in the gallery + a weighted-mean prototype computed
+
+> The degraded variants bridge the domain gap between close-up enrollment (140–230 px face) and distant classroom faces (14–50 px).
+
+### How attendance marking works
+
+1. Upload a classroom photo
+2. Detect all faces using SCRFD at 1280×1280
+3. For each detected face, extract a 512-d embedding
+4. For each enrolled student, compute:
+   `similarity = max(cosine vs prototype, max cosine vs all stored embeddings)`
+5. If best similarity ≥ **0.38** → recognized
+6. If two faces both match the same student, only the highest-scoring face gets the name — others stay Unknown
+
+### Re-enrollment
+Re-enrolling a student with the same name **adds** new embeddings to their existing gallery — does not overwrite. Useful for adding classroom-condition clips on top of selfie enrollment.
+
 ---
 
 ## Running Locally
