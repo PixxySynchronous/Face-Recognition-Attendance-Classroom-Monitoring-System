@@ -216,6 +216,20 @@ h1 {
   color: var(--muted);
 }
 
+.demo-btn {
+  margin-top: 8px;
+  width: 100%;
+  background: transparent;
+  border: 1.5px dashed #6366f1;
+  color: #6366f1;
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.demo-btn:hover { background: rgba(99,102,241,0.07); }
+.demo-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .marked-photo-preview {
   width: 100%;
   max-height: 420px;

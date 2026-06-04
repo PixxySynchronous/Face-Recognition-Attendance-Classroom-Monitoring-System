@@ -197,6 +197,28 @@ def attendance_mark():
     return jsonify({"ok": True, **result})
 
 
+@app.post("/api/attendance/demo")
+def attendance_demo():
+    import shutil
+    demo_src = Path(__file__).parent / "static" / "demo_classroom.jpg"
+    if not demo_src.exists():
+        return jsonify({"ok": False, "error": "Demo image not found."}), 404
+
+    service = get_attendance_service()
+    photo_path = ATTENDANCE_DIR / "uploads" / "demo_classroom.jpg"
+    photo_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(demo_src, photo_path)
+
+    try:
+        result = service.mark_attendance(photo_path)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    result["marked_url"] = attendance_artifact_url(Path(result["marked_url"]).name)
+    return jsonify({"ok": True, **result})
+
+
 @app.post("/api/process")
 def process_video():
     ensure_runtime_dirs()

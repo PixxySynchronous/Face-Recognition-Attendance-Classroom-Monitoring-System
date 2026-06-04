@@ -230,6 +230,33 @@ markForm.addEventListener("submit", async (event) => {
   } finally { btn.disabled = false; }
 });
 
+document.getElementById("demo-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("demo-btn");
+  btn.disabled = true;
+  markStatus.classList.remove("error");
+
+  // Step 1 — show original unannotated image immediately
+  markResult.classList.remove("hidden");
+  markedPhotoPreview.src = "/static/demo_classroom.jpg";
+  markStatus.textContent = "Here's the demo classroom photo. Running attendance pipeline...";
+
+  // Step 2 — run the pipeline
+  try {
+    const response = await fetch("/api/attendance/demo", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Demo failed.");
+    renderMarkedPhoto(data.marked_url);
+    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0);
+    renderAttendanceLog(data.attendance_log || []);
+    renderRoster(data.roster || []);
+    markStatus.textContent = `Demo complete — ${data.recognized.length} student${data.recognized.length === 1 ? "" : "s"} recognized.`;
+    await refreshAttendanceSummary();
+  } catch (err) {
+    markStatus.textContent = err.message;
+    markStatus.classList.add("error");
+  } finally { btn.disabled = false; }
+});
+
 async function refreshAttendanceSummary() {
   try {
     const response = await fetch("/api/attendance/roster");
