@@ -1,13 +1,3 @@
----
-title: PRISM AI
-emoji: 🎓
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 8080
-pinned: false
----
-
 # PRISM AI — Classroom Monitoring System
 
 An AI-powered classroom engagement and attendance monitoring system with a browser-based dashboard.
