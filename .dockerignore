@@ -1,11 +1,9 @@
 activity_web/runtime
 ACTIVITY CLASSIFICATION PIPELINE/outputs
 Student faces clips
-models
 *.pt
 *.ckpt
 *.pth
-*.onnx
 *.mp4
 *.mov
 *.avi
