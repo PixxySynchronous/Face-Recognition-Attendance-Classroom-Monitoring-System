@@ -8,3 +8,8 @@ activity_web/runtime/
 
 # Model weights — run `python download_models.py` to fetch these
 *.pt
+
+# Binary model files — uploaded separately via HF API
+*.onnx
+*.onnx.data
+*.task
