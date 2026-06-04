@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+activity_web/runtime/
+*.log
+.DS_Store
+
+# Model weights — run `python download_models.py` to fetch these
+*.pt

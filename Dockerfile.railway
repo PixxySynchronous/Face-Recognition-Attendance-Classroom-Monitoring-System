@@ -1,0 +1,51 @@
+# Optimized Dockerfile for Railway Deployment
+# Handles large ML dependencies and model files efficiently
+
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies required for ML libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ffmpeg \
+    git \
+    curl \
+    wget \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements first (for better caching)
+COPY requirements.txt /app/requirements.txt
+
+# Upgrade pip and install Python dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy application code (excluding large files via .dockerignore)
+COPY . /app
+
+# Create runtime directories
+RUN mkdir -p /data/activity_runtime/uploads && \
+    mkdir -p /data/activity_runtime/outputs && \
+    mkdir -p /data/activity_runtime/attendance
+
+# Set environment variables
+ENV PORT=8080
+ENV ACTIVITY_WEB_RUNTIME_DIR=/data/activity_runtime
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8080/ || exit 1
+
+# Start application
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "120", "--workers", "2", "activity_web.backend.app:app"]
