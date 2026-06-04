@@ -32,8 +32,10 @@ The pipeline classifies 6 fine-grained behaviours into two categories:
 
 ## Attendance — Face Recognition System
 
-### Detection model
-**InsightFace `antelopev2`** — SCRFD detector + GLinT-R100 recogniser (ResNet-100, Glint360K, 512-d L2-normalised embeddings)
+### Detection & recognition model
+**InsightFace `antelopev2`** — SCRFD-10G face detector + GLinT-R100 recogniser (ResNet-100, Glint360K, 512-d L2-normalised embeddings), running at det_size=1280×1280
+
+> Note: the underlying `utils/retinaface_detector.py` also contains a **SAHI + MTCNN + buffalo_l** wrapper (`build_face_analysis_with_retinaface_detector`) used by the classroom and cognitive pipelines for better small-face recall. The attendance module currently uses the plain antelopev2 detector.
 
 ### How enrollment works
 
