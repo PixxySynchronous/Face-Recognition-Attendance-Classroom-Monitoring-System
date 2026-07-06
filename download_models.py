@@ -62,6 +62,19 @@ def _download(url: str, dest: Path, retries: int = 5) -> None:
                 sys.exit(1)
 
 
+def _download_adaface() -> bool:
+    from utils.adaface_backbone import DEFAULT_CKPT_PATH, download_model
+
+    if DEFAULT_CKPT_PATH.exists() and not _is_lfs_pointer(DEFAULT_CKPT_PATH):
+        print(f"  {DEFAULT_CKPT_PATH.name} already present, skipping.")
+        return False
+    print(f"  downloading {DEFAULT_CKPT_PATH.name} from HuggingFace (minchul/cvlface_adaface_ir101_webface12m) …")
+    download_model(DEFAULT_CKPT_PATH)
+    size_mb = DEFAULT_CKPT_PATH.stat().st_size / 1e6
+    print(f"  {DEFAULT_CKPT_PATH.name} — {size_mb:.1f} MB  ✓")
+    return True
+
+
 def main() -> None:
     any_downloaded = False
     for rel, url, _ in MODELS:
@@ -71,6 +84,8 @@ def main() -> None:
             continue
         _download(url, dest)
         any_downloaded = True
+
+    any_downloaded = _download_adaface() or any_downloaded
 
     if not any_downloaded:
         print("All model weights are already in place.")

@@ -11,21 +11,31 @@ import cv2
 import numpy as np
 
 from insightface.app import FaceAnalysis
+from insightface.utils import face_align
 from .startup import ensure_insightface_models_flat
 from .config import ATTENDANCE_DIR
+from utils.adaface_backbone import AdaFaceWrapper, DEFAULT_CKPT_PATH as ADAFACE_CKPT_PATH
 
 
 UPLOAD_DIR = ATTENDANCE_DIR / "uploads"
 MARKED_DIR = ATTENDANCE_DIR / "marked"
 STORE_PATH = ATTENDANCE_DIR / "attendance_store.json"
 PHOTOS_PER_VIDEO = 32
-FACE_SIMILARITY_THRESHOLD = 0.38
-EMBEDDING_MODEL_NAME = "antelopev2_v3"
+# AdaFace IR-101's own p99 impostor threshold, derived from the human-labeled
+# clean eval set (eval/impostor_scope_eval.py) — NOT glintr100's 0.38, the two
+# backbones' cosine distributions aren't comparable.
+FACE_SIMILARITY_THRESHOLD = 0.28
+EMBEDDING_MODEL_NAME = "adaface_ir101_webface12m"
 ENROLLMENT_MIN_DET_SCORE = 0.50
+# Unchanged from glintr100: eval/build_gallery.py mirrors production enrollment
+# and kept this same value (0.50) when building the AdaFace gallery used in
+# every comparison run, so no evidence it needs to move for the new backbone.
 ENROLLMENT_OUTLIER_SIM_THRESHOLD = 0.50
 MAX_STORED_EMBEDDINGS = 128
 ENROLLMENT_SAMPLE_INTERVAL_S = 1.0   # sample one frame every 1 second for enrollment
 MAX_ENROLLMENT_FRAMES = 30           # cap to avoid overly long videos
+# Unchanged from glintr100 (see ENROLLMENT_OUTLIER_SIM_THRESHOLD note above) —
+# eval/build_gallery.py's _ANCHOR_SIM_THRESH stayed at 0.35 for AdaFace too.
 ANCHOR_CONSISTENCY_THRESHOLD = 0.35
 # Degradation scales applied during enrollment to bridge the gap between
 # close-up enrollment faces and small distant classroom faces.
@@ -51,7 +61,15 @@ def _normalize(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
-def _degrade_and_embed(fa: FaceAnalysis, frame: np.ndarray, bbox: tuple, scale: float) -> np.ndarray | None:
+def _align_and_embed(adaface: AdaFaceWrapper, frame: np.ndarray, kps: np.ndarray) -> np.ndarray:
+    """Align a face via InsightFace's norm_crop (same alignment AdaFace was
+    trained/calibrated against) and embed it with the AdaFace backbone."""
+    aligned = face_align.norm_crop(frame, landmark=np.asarray(kps, dtype=np.float32), image_size=112)
+    emb, _feat_norm = adaface.embed_aligned(aligned)
+    return _normalize(emb)
+
+
+def _degrade_and_embed(fa: FaceAnalysis, adaface: AdaFaceWrapper, frame: np.ndarray, bbox: tuple, scale: float) -> np.ndarray | None:
     """Shrink a face crop to `scale` fraction then bicubic back to original size,
     then re-run recognition on that blurry crop.  Simulates how a distant classroom
     face looks to the recognition model, so the enrollment gallery contains embeddings
@@ -68,13 +86,13 @@ def _degrade_and_embed(fa: FaceAnalysis, frame: np.ndarray, bbox: tuple, scale: 
     degraded = cv2.resize(crop, (small_w, small_h), interpolation=cv2.INTER_AREA)
     degraded = cv2.resize(degraded, (cw, ch), interpolation=cv2.INTER_CUBIC)
 
-    # Paste degraded crop back into a copy of the frame and re-run fa.get
+    # Paste degraded crop back into a copy of the frame and re-run detection
     frame_copy = frame.copy()
     frame_copy[y1:y2, x1:x2] = degraded
     faces = fa.get(frame_copy)
 
     # Pick the face closest to the original bbox
-    best_emb, best_iou = None, 0.0
+    best_kps, best_iou = None, 0.0
     for f in faces:
         fx1, fy1, fx2, fy2 = [int(v) for v in f.bbox]
         ix1, iy1 = max(x1, fx1), max(y1, fy1)
@@ -82,14 +100,12 @@ def _degrade_and_embed(fa: FaceAnalysis, frame: np.ndarray, bbox: tuple, scale: 
         inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
         union = (x2-x1)*(y2-y1) + (fx2-fx1)*(fy2-fy1) - inter
         iou = inter / union if union > 0 else 0.0
-        if iou > best_iou:
-            e = getattr(f, "normed_embedding", None)
-            if e is None:
-                e = getattr(f, "embedding", None)
-            if e is not None:
-                best_emb = _normalize(np.asarray(e, dtype=np.float32).flatten().copy())
-                best_iou = iou
-    return best_emb
+        if iou > best_iou and getattr(f, "kps", None) is not None:
+            best_kps = f.kps
+            best_iou = iou
+    if best_kps is None:
+        return None
+    return _align_and_embed(adaface, frame_copy, best_kps)
 
 
 
@@ -116,10 +132,11 @@ class AttendanceService:
         ensure_attendance_dirs()
         self.face_analysis = FaceAnalysis(
             name="antelopev2",
-            allowed_modules=["detection", "recognition"],
+            allowed_modules=["detection"],
             providers=["CPUExecutionProvider"],
         )
         self.face_analysis.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.5)
+        self.adaface = AdaFaceWrapper.load(ADAFACE_CKPT_PATH)
         self._migrate_legacy_embeddings_if_needed()
 
     def _read_store(self) -> dict:
@@ -202,15 +219,13 @@ class AttendanceService:
         faces = self.face_analysis.get(frame)
         samples: list[FaceSample] = []
         for face in faces:
-            embedding = getattr(face, "normed_embedding", None)
-            if embedding is None:
-                embedding = getattr(face, "embedding", None)
-            if embedding is None:
+            kps = getattr(face, "kps", None)
+            if kps is None:
                 continue
             bbox = tuple(int(value) for value in face.bbox)
             samples.append(
                 FaceSample(
-                    embedding=_normalize(np.asarray(embedding, dtype=np.float32)),
+                    embedding=_align_and_embed(self.adaface, frame, kps),
                     bbox=bbox,
                     score=float(getattr(face, "det_score", 0.0)),
                 )
@@ -252,7 +267,7 @@ class AttendanceService:
                 results.append((primary.embedding, float(primary.score)))
                 # Also enroll degraded versions to match distant classroom conditions
                 for scale in ENROLLMENT_DEGRADATION_SCALES:
-                    deg = _degrade_and_embed(self.face_analysis, frame, primary.bbox, scale)
+                    deg = _degrade_and_embed(self.face_analysis, self.adaface, frame, primary.bbox, scale)
                     if deg is not None:
                         results.append((deg, float(primary.score) * 0.9))
             else:
@@ -263,7 +278,7 @@ class AttendanceService:
                     results.append((best.embedding, float(best.score)))
                     # Also enroll degraded versions
                     for scale in ENROLLMENT_DEGRADATION_SCALES:
-                        deg = _degrade_and_embed(self.face_analysis, frame, best.bbox, scale)
+                        deg = _degrade_and_embed(self.face_analysis, self.adaface, frame, best.bbox, scale)
                         if deg is not None:
                             results.append((deg, float(best.score) * 0.9))
 

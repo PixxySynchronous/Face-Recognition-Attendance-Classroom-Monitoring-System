@@ -6,6 +6,7 @@ Pillow
 opencv-python-headless
 ultralytics
 insightface
+huggingface_hub
 torch
 torchvision
 imageio-ffmpeg
