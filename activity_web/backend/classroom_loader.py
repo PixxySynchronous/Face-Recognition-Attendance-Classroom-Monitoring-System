@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from .startup import ensure_insightface_models_flat
+from .config import ATTENDANCE_DIR
 
 
 def _pipeline_script_path() -> Path:
@@ -30,4 +31,5 @@ def _load_module() -> ModuleType:
 
 @lru_cache(maxsize=1)
 def get_classroom_pipeline():
-    return _load_module().ClassroomPipeline()
+    roster_path = ATTENDANCE_DIR / "attendance_store.json"
+    return _load_module().ClassroomPipeline(roster_path=roster_path)

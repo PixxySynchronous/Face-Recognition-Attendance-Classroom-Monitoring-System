@@ -16,14 +16,13 @@ Output
 
 from __future__ import annotations
 
-import bz2
 import csv
 import json
 import shutil
+from collections import Counter
 import subprocess
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -36,22 +35,23 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-try:
-    import dlib
-    DLIB_AVAILABLE = True
-except Exception:
-    dlib = None
-    DLIB_AVAILABLE = False
-    print("[classroom] warning: dlib not available; landmark-based features disabled.")
-
 from insightface.app import FaceAnalysis
+from insightface.utils import face_align
 from ultralytics import YOLO
+
+from utils.adaface_backbone import AdaFaceWrapper, DEFAULT_CKPT_PATH as ADAFACE_CKPT_PATH
+from utils.roster_match import load_roster, match_against_roster
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
 BURST_FRAMES         = 24      # consecutive frames per analysis window
 SAMPLE_EVERY_SECONDS = 30.0    # one window every N seconds
-IDENTITY_THRESHOLD   = 0.40    # cosine similarity → same student
+# Cosine similarity for within-video re-identification (AdaFace embedding space).
+# Deliberately a bit more conservative than the Attendance roster-match threshold
+# (0.28, derived from eval/impostor_scope_eval.py) — a false merge here silently
+# conflates two different students' timelines, which is worse than a false split
+# (which just double-counts one student under two IDs).
+IDENTITY_THRESHOLD   = 0.35
 MIN_BURST_DETECTIONS = 6       # min frames face must appear in burst to count
 FACE_IOU_THRESHOLD   = 0.30    # IoU to link face across burst frames
 CLIP_FPS             = 5.0     # clip playback speed
@@ -72,6 +72,13 @@ GAZE_PITCH_THRESH = 18.0
 
 HIGH_ATTENTION_PCT   = 70.0
 MEDIUM_ATTENTION_PCT = 40.0
+# Minimum mouth-closed concentration_pct to call a window "Attentive". Derived
+# from a threshold sweep against a labeled dataset (activity_dataset/datasets/
+# annotations_split2*.csv, n=156 scored clips): accuracy plateaus at ~67-70%
+# for conc_pct thresholds from 60-95, peaking around 80-85, vs. ~60% at a
+# threshold of 50 and effectively random (EAR showed no separation at all)
+# under the old EAR-based formula this replaced.
+ATTENTIVE_CONC_THRESH = 80.0
 
 _FOCUS_EMOTIONS    = {"happy", "neutral", "surprise"}
 _DISTRACT_EMOTIONS = {"sad", "angry", "fear", "disgust"}
@@ -83,9 +90,20 @@ _L_ELBOW, _R_ELBOW = 7, 8
 _L_WRIST, _R_WRIST = 9, 10
 _L_HIP,   _R_HIP   = 11, 12
 
-_LEFT_EYE_IDX  = list(range(36, 42))
-_RIGHT_EYE_IDX = list(range(42, 48))
-_LANDMARK_2D_IDX = [30, 8, 36, 45, 48, 54]
+# Index mapping into InsightFace's `landmark_2d_106` output (replaces the old
+# dlib 68-point scheme, which required a separate ~95MB model that was never
+# actually installed in this environment — see git history for the dlib version).
+# These indices were derived empirically (not from memorized docs): a real face's
+# 106 points were plotted and numbered, confirming eye clusters at 33-42/87-96,
+# eyebrows at 43-51/97-105, mouth at 52-71 (outer 52-61, inner 62-71), nose at
+# 72-86, and jaw contour at 0-32. Each 6/8-point subset below is ordered to match
+# what `_compute_ear`/`_compute_mar` (unchanged) expect: corner, upper.., corner,
+# lower.. — same shape as the dlib 68-point convention they were written for.
+_EYE_LEFT_IDX_106  = [35, 41, 42, 39, 37, 36]
+_EYE_RIGHT_IDX_106 = [89, 95, 96, 93, 91, 90]
+_MOUTH_INNER_IDX_106 = [65, 63, 71, 67, 69, 70, 62, 66]
+# nose tip, chin, left-eye outer corner, right-eye outer corner, left mouth corner, right mouth corner
+_LANDMARK_2D_IDX = [80, 0, 35, 93, 52, 61]
 
 _FACE_3D = np.array([
     (  0.0,    0.0,    0.0),
@@ -106,26 +124,6 @@ ACTION_COLORS = {
 }
 
 
-# ── dlib model download ───────────────────────────────────────────────────────
-
-def _ensure_dlib_model() -> Path:
-    model_dir  = Path.home() / ".dlib"
-    model_dir.mkdir(exist_ok=True)
-    model_path = model_dir / "shape_predictor_68_face_landmarks.dat"
-    if model_path.exists():
-        return model_path
-    print("  [classroom] downloading dlib model (~95 MB) …")
-    bz2_path = model_path.with_suffix(".dat.bz2")
-    urllib.request.urlretrieve(
-        "https://github.com/davisking/dlib-models/raw/master/shape_predictor_68_face_landmarks.dat.bz2",
-        bz2_path,
-    )
-    with bz2.open(bz2_path, "rb") as fin, open(model_path, "wb") as fout:
-        fout.write(fin.read())
-    bz2_path.unlink(missing_ok=True)
-    return model_path
-
-
 # ── signal helpers ────────────────────────────────────────────────────────────
 
 def _compute_ear(pts: np.ndarray) -> float:
@@ -135,8 +133,7 @@ def _compute_ear(pts: np.ndarray) -> float:
     return float((A + B) / (2.0 * C)) if C > 0 else 0.0
 
 
-def _compute_mar(pts: np.ndarray) -> float:
-    lip = pts[60:68]
+def _compute_mar(lip: np.ndarray) -> float:
     A = dist.euclidean(lip[1], lip[7])
     B = dist.euclidean(lip[2], lip[6])
     C = dist.euclidean(lip[3], lip[5])
@@ -234,7 +231,7 @@ def _detect_action(phone_pct, sleeping_pct, writing_pct,
     # Require actual open↔closed cycling — a yawn or smile won't fire.
     mouth_talking = mouth_transitions >= MIN_MOUTH_TRANSITIONS and sleeping_pct < 0.25
     if sideways_pct >= 0.30 or mouth_talking: return "Talking"
-    if conc_pct     >= 50.0: return "Attentive"
+    if conc_pct     >= ATTENTIVE_CONC_THRESH: return "Attentive"
     return "Distracted"
 
 
@@ -280,6 +277,7 @@ class _BurstTrack:
     pose_boxes:  list = field(default_factory=list)   # body bbox or None per frame
     kps_list:    list = field(default_factory=list)   # keypoints or None per frame
     embeddings:  list = field(default_factory=list)   # face embedding or None per frame
+    lmk106_list: list = field(default_factory=list)   # 106-pt face landmarks or None per frame
     export_crops: list = field(default_factory=list)  # annotated body crop per frame
     motions:     list = field(default_factory=list)   # optical-flow magnitudes
     phone_hits:  list = field(default_factory=list)   # bool per frame
@@ -291,6 +289,7 @@ class _BurstTrack:
         self.pose_boxes   = [None] * self.n_frames
         self.kps_list     = [None] * self.n_frames
         self.embeddings   = [None] * self.n_frames
+        self.lmk106_list  = [None] * self.n_frames
         self.export_crops = [None] * self.n_frames
         self.motions      = [0.0]  * self.n_frames
         self.phone_hits   = [False] * self.n_frames
@@ -417,10 +416,15 @@ class ClassroomPipeline:
         burst_frames:        int   = BURST_FRAMES,
         sample_every_seconds: float = SAMPLE_EVERY_SECONDS,
         identity_threshold:  float = IDENTITY_THRESHOLD,
+        roster_path:         str | Path | None = None,
     ):
         self.burst_frames         = burst_frames
         self.sample_every_seconds = sample_every_seconds
         self.identity_threshold   = identity_threshold
+
+        self._roster = load_roster(roster_path) if roster_path else []
+        if roster_path:
+            print(f"  [classroom] loaded {len(self._roster)} enrolled student(s) from roster.")
 
         print("  [classroom] loading YOLOv8-pose …")
         self._pose = YOLO(str(pose_model_path or _pose_model_path()))
@@ -438,23 +442,16 @@ class ClassroomPipeline:
             if not self._phone_cls_ids:
                 self._phone_cls_ids = set(names.keys())
 
-        print("  [classroom] loading InsightFace buffalo_l …")
+        print("  [classroom] loading InsightFace buffalo_l (detection + 106pt landmarks) …")
         self._fa = FaceAnalysis(
             name="buffalo_l",
-            allowed_modules=["detection", "recognition"],
+            allowed_modules=["detection", "landmark_2d_106"],
             providers=["CPUExecutionProvider"],
         )
         self._fa.prepare(ctx_id=0, det_size=(640, 640), det_thresh=FACE_THRESH)
 
-        if DLIB_AVAILABLE:
-            print("  [classroom] loading dlib shape predictor …")
-            try:
-                self._predictor = dlib.shape_predictor(str(_ensure_dlib_model()))
-            except Exception:
-                self._predictor = None
-                print("  [classroom] warning: failed to load dlib shape predictor; landmark-based features disabled.")
-        else:
-            self._predictor = None
+        print("  [classroom] loading AdaFace IR-101 …")
+        self._adaface = AdaFaceWrapper.load(ADAFACE_CKPT_PATH)
 
         print("  [classroom] warming DeepFace …")
         _analyze_emotion(np.zeros((48, 48, 3), dtype=np.uint8))
@@ -592,15 +589,20 @@ class ClassroomPipeline:
             face_dets = []
             raw_faces = self._fa.get(frame)
             for face in (raw_faces or []):
-                emb = getattr(face, "normed_embedding", None)
-                if emb is None:
-                    emb = getattr(face, "embedding", None)
-                if emb is not None:
+                kps = getattr(face, "kps", None)
+                emb = None
+                if kps is not None:
+                    aligned = face_align.norm_crop(frame, landmark=np.asarray(kps, dtype=np.float32), image_size=112)
+                    emb, _feat_norm = self._adaface.embed_aligned(aligned)
                     emb = _normalize(np.asarray(emb, dtype=np.float32))
+                lmk106 = getattr(face, "landmark_2d_106", None)
+                if lmk106 is not None:
+                    lmk106 = np.asarray(lmk106, dtype=np.float32)
                 x1, y1, x2, y2 = [int(v) for v in face.bbox]
                 face_dets.append({
                     "bbox": (max(0,x1), max(0,y1), min(iw,x2), min(ih,y2)),
                     "embedding": emb,
+                    "lmk106": lmk106,
                     "score": float(face.det_score),
                 })
             face_dets_per_frame.append(face_dets)
@@ -655,6 +657,7 @@ class ClassroomPipeline:
                 track.last_face_box  = det["bbox"]
                 track.face_boxes[fi] = det["bbox"]
                 track.embeddings[fi] = det["embedding"]
+                track.lmk106_list[fi] = det["lmk106"]
                 track.observations  += 1
 
                 # Match to best overlapping pose detection
@@ -688,6 +691,7 @@ class ClassroomPipeline:
                 t.last_face_box  = det["bbox"]
                 t.face_boxes[fi] = det["bbox"]
                 t.embeddings[fi] = det["embedding"]
+                t.lmk106_list[fi] = det["lmk106"]
                 t.observations   = 1
                 for pd in pose_dets_per_frame[fi]:
                     if _iou(det["bbox"], pd["bbox"]) > 0.05:
@@ -696,25 +700,66 @@ class ClassroomPipeline:
                         break
                 tracks.append(t)
 
+        # ── batch identity resolution (one-to-one per burst) ──────────────────
+        # Resolving each track independently and sequentially would let two different
+        # real people seen in the *same* burst both match (and blend into) the same
+        # existing identity. Instead resolve the whole burst as a one-to-one assignment:
+        # highest-similarity (track, identity) pairs win first, and once a track or an
+        # identity is claimed, neither can be reused within this burst.
+        track_embeddings: dict[int, np.ndarray] = {}
+        for track in tracks:
+            if track.observations < MIN_BURST_DETECTIONS:
+                continue
+            valid_embs = [e for e in track.embeddings if e is not None]
+            if not valid_embs:
+                continue
+            track_embeddings[track.track_id] = _normalize(np.mean(np.stack(valid_embs), axis=0))
+
+        candidates = []  # (similarity, track_id, identity_index)
+        for track_id, emb in track_embeddings.items():
+            for idx, identity in enumerate(student_bank):
+                sim = float(np.dot(identity.prototype, emb))
+                if sim >= self.identity_threshold:
+                    candidates.append((sim, track_id, idx))
+        candidates.sort(key=lambda c: c[0], reverse=True)
+
+        resolved: dict[int, tuple[int, float]] = {}   # track_id -> (student_id, similarity)
+        claimed_tracks: set[int] = set()
+        claimed_identities: set[int] = set()
+        for sim, track_id, idx in candidates:
+            if track_id in claimed_tracks or idx in claimed_identities:
+                continue
+            claimed_tracks.add(track_id)
+            claimed_identities.add(idx)
+            identity = student_bank[idx]
+            identity.update(track_embeddings[track_id])
+            resolved[track_id] = (identity.student_id, sim)
+
+        for track_id, emb in track_embeddings.items():
+            if track_id in resolved:
+                continue
+            new_id = next_student_id
+            next_student_id += 1
+            student_bank.append(StudentIdentity(student_id=new_id, prototype=emb.copy()))
+            resolved[track_id] = (new_id, 0.0)
+
+        # ── roster recognition — read-only lookup against enrolled Attendance
+        # students, independent of the anonymous student_bank above ────────────
+        recognized_by_track: dict[int, tuple[str | None, float]] = {}
+        if self._roster:
+            for track_id, emb in track_embeddings.items():
+                recognized_by_track[track_id] = match_against_roster(emb, self._roster)
+
         # ── per-track classification + clip ──────────────────────────────────
         records: list[dict] = []
 
         for track in tracks:
-            if track.observations < MIN_BURST_DETECTIONS:
+            if track.track_id not in track_embeddings:
                 continue
 
-            # Average embedding → student re-ID
-            valid_embs = [e for e in track.embeddings if e is not None]
-            if not valid_embs:
-                continue
-            avg_emb = _normalize(np.mean(np.stack(valid_embs), axis=0))
-            if avg_emb is None:
-                continue
-
-            next_student_id, student_id, sim = self._resolve_identity(
-                avg_emb, student_bank, next_student_id
-            )
+            student_id, sim = resolved[track.track_id]
             student_label = f"student_{student_id:03d}"
+            recognized_name, recognized_sim = recognized_by_track.get(track.track_id, (None, -1.0))
 
             # ── body signals ──────────────────────────────────────────────────
             head_states  = []
@@ -758,25 +803,17 @@ class ClassroomPipeline:
             # ── face signals ──────────────────────────────────────────────────
             ears, mars, pitches, gazes, emotions = [], [], [], [], []
             for fi in range(n_frames):
-                fb = track.face_boxes[fi]
-                if fb is None:
+                pts = track.lmk106_list[fi]
+                if pts is None:
                     continue
-                fx1, fy1, fx2, fy2 = fb
-                if fx2 <= fx1 or fy2 <= fy1:
-                    continue
-                if DLIB_AVAILABLE and self._predictor is not None:
-                    try:
-                        drect = dlib.rectangle(fx1, fy1, fx2, fy2)
-                        shape = self._predictor(grays[fi], drect)
-                        pts   = np.array([[shape.part(j).x, shape.part(j).y]
-                                          for j in range(68)], dtype=np.float32)
-                        ears.append((_compute_ear(pts[_LEFT_EYE_IDX]) + _compute_ear(pts[_RIGHT_EYE_IDX])) / 2)
-                        mars.append(_compute_mar(pts))
-                        yaw, pitch = _head_pose(pts[_LANDMARK_2D_IDX], iw, ih)
-                        pitches.append(pitch)
-                        gazes.append(_gaze_label(yaw, pitch))
-                    except Exception:
-                        pass
+                try:
+                    ears.append((_compute_ear(pts[_EYE_LEFT_IDX_106]) + _compute_ear(pts[_EYE_RIGHT_IDX_106])) / 2)
+                    mars.append(_compute_mar(pts[_MOUTH_INNER_IDX_106]))
+                    yaw, pitch = _head_pose(pts[_LANDMARK_2D_IDX], iw, ih)
+                    pitches.append(pitch)
+                    gazes.append(_gaze_label(yaw, pitch))
+                except Exception:
+                    pass
 
             # Emotion — run once on middle frame face crop (expensive)
             dom_emotion, emot_probs = "neutral", {}
@@ -801,17 +838,18 @@ class ClassroomPipeline:
             mouth_open_pct = sum(mouth_flags) / max(1, len(mouth_flags))
             n_mouth_trans  = _mouth_transitions(mouth_flags)
             center_gaze_n  = sum(1 for g in gazes if g == "center")
-            conc_pct = 0.0
-            if ears and gazes:
-                focused_n = sum(
-                    1 for ear, gaze in zip(ears, gazes)
-                    if ear >= EAR_BLINK_THRESH
-                    and gaze == "center"
-                    and dom_emotion not in _DISTRACT_EMOTIONS
-                )
-                conc_pct = round(focused_n / len(ears) * 100, 1)
+            # Concentration is driven by mouth-closed fraction, not EAR/gaze.
+            # A 300-clip calibration run against a real labeled dataset
+            # (activity_dataset/datasets/annotations_split2*.csv) showed EAR has
+            # ~zero separation between attentive and non-attentive clips (means
+            # 0.199 vs 0.213), while mouth_open_pct separates them cleanly
+            # (medians 0.0 vs ~0.96) — attentive clips keep the mouth closed,
+            # everything else (talking/phone/distracted/head down/head side)
+            # tends to have it open.
+            if mouth_flags:
+                conc_pct = round((1.0 - mouth_open_pct) * 100, 1)
             else:
-                # fallback: body signals
+                # fallback: body signals, no face detected this window
                 conc_pct = round(forward_pct * 100, 1)
 
             action     = _detect_action(phone_pct, sleeping_pct, writing_pct,
@@ -843,6 +881,8 @@ class ClassroomPipeline:
                 "student_id":           student_id,
                 "student_label":        student_label,
                 "identity_similarity":  round(float(sim), 4),
+                "recognized_name":      recognized_name,
+                "recognized_similarity": round(float(recognized_sim), 4) if recognized_name else None,
                 "action":               action,
                 "attention_status":     attn_level,
                 "concentration_pct":    conc_pct,
@@ -862,32 +902,35 @@ class ClassroomPipeline:
 
         return records, next_student_id
 
-    # ── identity resolution ───────────────────────────────────────────────────
-
-    def _resolve_identity(
-        self,
-        embedding: np.ndarray,
-        student_bank: list[StudentIdentity],
-        next_id: int,
-    ) -> tuple[int, int, float]:
-        best, best_sim = None, -1.0
-        for identity in student_bank:
-            sim = float(np.dot(identity.prototype, embedding))
-            if sim > best_sim:
-                best_sim, best = sim, identity
-        if best is not None and best_sim >= self.identity_threshold:
-            best.update(embedding)
-            return next_id, best.student_id, best_sim
-        new_id = next_id
-        student_bank.append(StudentIdentity(student_id=new_id, prototype=embedding.copy()))
-        return next_id + 1, new_id, 0.0
-
     # ── aggregation ───────────────────────────────────────────────────────────
 
     def _aggregate(self, records: list[dict], student_bank: list[StudentIdentity]) -> list[dict]:
         by_student: dict[int, list[dict]] = {}
         for r in records:
             by_student.setdefault(r["student_id"], []).append(r)
+
+        # Merge anonymous IDs that both confidently matched the same enrolled student.
+        # Within-video re-identification (student_bank, one evolving prototype per ID)
+        # and roster recognition (a full multi-embedding enrollment gallery) use
+        # different thresholds and can disagree about whether two appearances are
+        # "the same track" even when the roster match agrees they're the same real
+        # person — e.g. lighting/pose drift can push two bursts of the same person
+        # below the re-ID threshold while both still clear the roster threshold
+        # independently. Trust the roster match and merge.
+        name_to_sids: dict[str, list[int]] = {}
+        for sid, wins in by_student.items():
+            names = [w["recognized_name"] for w in wins if w.get("recognized_name")]
+            if not names:
+                continue
+            majority_name = Counter(names).most_common(1)[0][0]
+            name_to_sids.setdefault(majority_name, []).append(sid)
+
+        for name, sids in name_to_sids.items():
+            if len(sids) < 2:
+                continue
+            primary, *duplicates = sorted(sids)
+            for dup in duplicates:
+                by_student[primary].extend(by_student.pop(dup))
 
         students = []
         for sid, wins in sorted(by_student.items()):
@@ -905,9 +948,13 @@ class ClassroomPipeline:
 
             timeline = sorted(wins, key=lambda w: w["window_start_seconds"])
 
+            recognized_names = [w["recognized_name"] for w in wins if w.get("recognized_name")]
+            recognized_name  = Counter(recognized_names).most_common(1)[0][0] if recognized_names else None
+
             students.append({
                 "student_id":       sid,
                 "student_label":    f"student_{sid:03d}",
+                "recognized_name":  recognized_name,
                 "windows_seen":     n,
                 "dominant_action":  dominant_action,
                 "attentive_pct":    attn_pct,
@@ -926,12 +973,12 @@ class ClassroomPipeline:
     @staticmethod
     def _write_csv(path: Path, records: list[dict]) -> None:
         fields = [
-            "window_start_seconds", "student_id", "student_label",
+            "window_start_seconds", "student_id", "student_label", "recognized_name",
             "action", "attention_status", "concentration_pct",
             "emotion", "phone_pct", "writing_pct", "sleeping_pct",
             "sideways_pct", "mouth_open_pct", "avg_ear", "avg_motion",
             "face_frames", "body_frames", "observations",
-            "identity_similarity", "clip",
+            "identity_similarity", "recognized_similarity", "clip",
         ]
         with path.open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")

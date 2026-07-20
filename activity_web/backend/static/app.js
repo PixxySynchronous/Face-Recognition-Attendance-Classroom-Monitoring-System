@@ -114,9 +114,12 @@ function renderClassroomStudents(students) {
     }).join("");
 
     const attColor = student.attentive_pct >= 70 ? "#22c55e" : student.attentive_pct >= 40 ? "#f59e0b" : "#ef4444";
+    const idLabel = student.recognized_name
+      ? `<span class="cls-student-name">${student.recognized_name}</span><span class="cls-student-id cls-student-id-secondary">${student.student_label}</span>`
+      : `<span class="cls-student-id">${student.student_label}</span>`;
     return `<details class="cls-student-card" open>
       <summary class="cls-student-summary">
-        <span class="cls-student-id">${student.student_label}</span>
+        ${idLabel}
         <span class="cls-student-dominant">${student.dominant_action}</span>
         <span class="cls-student-attn" style="color:${attColor}">${student.attentive_pct}% attentive</span>
         <span class="cls-student-windows">${student.windows_seen} windows</span>
@@ -218,7 +221,7 @@ markForm.addEventListener("submit", async (event) => {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Attendance marking failed.");
     renderMarkedPhoto(data.marked_url);
-    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0);
+    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderAttendanceLog(data.attendance_log || []);
     renderRoster(data.roster || []);
     markStatus.textContent = `Marked ${data.recognized.length} student${data.recognized.length === 1 ? "" : "s"}.`;
@@ -237,6 +240,7 @@ document.getElementById("demo-preview-btn").addEventListener("click", () => {
   markResult.classList.remove("hidden");
   recognizedList.innerHTML = "";
   attendanceLogList.innerHTML = "";
+  hideUnknownFacesUI();
 });
 
 document.getElementById("demo-btn").addEventListener("click", async () => {
@@ -255,7 +259,7 @@ document.getElementById("demo-btn").addEventListener("click", async () => {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Demo failed.");
     renderMarkedPhoto(data.marked_url);
-    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0);
+    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderAttendanceLog(data.attendance_log || []);
     renderRoster(data.roster || []);
     markStatus.textContent = `Demo complete — ${data.recognized.length} student${data.recognized.length === 1 ? "" : "s"} recognized.`;
@@ -288,13 +292,97 @@ function renderMarkedPhoto(url) {
   markedPhotoPreview.src = url;
 }
 
-function renderRecognizedFaces(recognized, unknownFaces) {
+const unknownFacesToggle = document.getElementById("unknown-faces-toggle");
+const unknownFacesGrid   = document.getElementById("unknown-faces-grid");
+let currentUnknownFaces  = [];
+let unknownFacesExpanded = false;
+
+function renderRecognizedFaces(recognized, unknownFaces, unknownFacesDetail) {
+  const names = recognized.map((e) => e.student.name);
+  const summary = names.length
+    ? `<div class="result-summary">${names.length} present: ${names.join(", ")}</div>`
+    : `<div class="result-summary muted">0 present</div>`;
+
   recognizedList.innerHTML = `<h3>Recognized faces</h3>
+    ${summary}
     ${recognized.length
       ? recognized.map((e) => `<div class="result-item"><strong>${e.student.name}</strong><span>Confidence ${formatNumber(e.confidence)}</span></div>`).join("")
-      : '<div class="result-item muted">No enrolled students recognized.</div>'}
-    <div class="result-item muted">Unknown faces: ${unknownFaces}</div>`;
+      : '<div class="result-item muted">No enrolled students recognized.</div>'}`;
+
+  currentUnknownFaces = unknownFacesDetail || [];
+  unknownFacesExpanded = false;
+  unknownFacesGrid.classList.add("hidden");
+  unknownFacesGrid.innerHTML = "";
+
+  if (currentUnknownFaces.length) {
+    unknownFacesToggle.classList.remove("hidden");
+    unknownFacesToggle.textContent = `Show unknown faces (${currentUnknownFaces.length})`;
+  } else {
+    unknownFacesToggle.classList.add("hidden");
+  }
 }
+
+function hideUnknownFacesUI() {
+  currentUnknownFaces = [];
+  unknownFacesExpanded = false;
+  unknownFacesToggle.classList.add("hidden");
+  unknownFacesGrid.classList.add("hidden");
+  unknownFacesGrid.innerHTML = "";
+}
+
+function cropUnknownFaceThumbnails(imgEl, faces, pad = 26, outSize = 220) {
+  const source = document.createElement("canvas");
+  source.width = imgEl.naturalWidth;
+  source.height = imgEl.naturalHeight;
+  const sctx = source.getContext("2d");
+  sctx.drawImage(imgEl, 0, 0);
+
+  return faces.map(({ bbox, similarity }) => {
+    const [x1, y1, x2, y2] = bbox;
+    const px1 = Math.max(0, x1 - pad);
+    const py1 = Math.max(0, y1 - pad);
+    const px2 = Math.min(source.width, x2 + pad);
+    const py2 = Math.min(source.height, y2 + pad);
+    const pw = Math.max(1, px2 - px1);
+    const ph = Math.max(1, py2 - py1);
+
+    const out = document.createElement("canvas");
+    const scale = Math.max(outSize / pw, outSize / ph);
+    out.width = Math.round(pw * scale);
+    out.height = Math.round(ph * scale);
+    const octx = out.getContext("2d");
+    octx.imageSmoothingQuality = "high";
+    octx.drawImage(source, px1, py1, pw, ph, 0, 0, out.width, out.height);
+    return { dataUrl: out.toDataURL("image/jpeg", 0.88), similarity };
+  });
+}
+
+function renderUnknownFacesGrid() {
+  const thumbs = cropUnknownFaceThumbnails(markedPhotoPreview, currentUnknownFaces);
+  unknownFacesGrid.innerHTML = thumbs
+    .map(
+      (t) => `
+        <figure class="unknown-face-card">
+          <img src="${t.dataUrl}" alt="Unrecognized face, similarity ${formatNumber(t.similarity)}" />
+          <figcaption>Unknown &middot; ${formatNumber(t.similarity)}</figcaption>
+        </figure>`
+    )
+    .join("");
+}
+
+unknownFacesToggle.addEventListener("click", () => {
+  unknownFacesExpanded = !unknownFacesExpanded;
+  if (unknownFacesExpanded) {
+    const build = () => renderUnknownFacesGrid();
+    if (markedPhotoPreview.complete && markedPhotoPreview.naturalWidth) build();
+    else markedPhotoPreview.addEventListener("load", build, { once: true });
+    unknownFacesGrid.classList.remove("hidden");
+    unknownFacesToggle.textContent = `Hide unknown faces (${currentUnknownFaces.length})`;
+  } else {
+    unknownFacesGrid.classList.add("hidden");
+    unknownFacesToggle.textContent = `Show unknown faces (${currentUnknownFaces.length})`;
+  }
+});
 
 function renderAttendanceLog(log) {
   attendanceLogList.innerHTML = `<h3>Attendance log</h3>

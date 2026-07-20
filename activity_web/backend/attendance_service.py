@@ -32,8 +32,8 @@ ENROLLMENT_MIN_DET_SCORE = 0.50
 # every comparison run, so no evidence it needs to move for the new backbone.
 ENROLLMENT_OUTLIER_SIM_THRESHOLD = 0.50
 MAX_STORED_EMBEDDINGS = 128
-ENROLLMENT_SAMPLE_INTERVAL_S = 1.0   # sample one frame every 1 second for enrollment
-MAX_ENROLLMENT_FRAMES = 30           # cap to avoid overly long videos
+MAX_ENROLLMENT_FRAMES = 30           # target/cap on sampled frames per enrollment video,
+                                      # spread evenly across the clip regardless of its length
 # Unchanged from glintr100 (see ENROLLMENT_OUTLIER_SIM_THRESHOLD note above) —
 # eval/build_gallery.py's _ANCHOR_SIM_THRESH stayed at 0.35 for AdaFace too.
 ANCHOR_CONSISTENCY_THRESHOLD = 0.35
@@ -191,7 +191,10 @@ class AttendanceService:
         return self._sample_video_frames(media_path)
 
     def _sample_frames_for_enrollment(self, media_path: Path) -> list[np.ndarray]:
-        """Sample one frame every ENROLLMENT_SAMPLE_INTERVAL_S seconds from a video."""
+        """Sample up to MAX_ENROLLMENT_FRAMES frames, spread evenly across the
+        whole clip. Deriving the step from total_frames (rather than a fixed
+        per-second interval) means short clips still yield close to the target
+        frame count instead of being starved by their length."""
         suffix = media_path.suffix.lower()
         if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
             image = self._load_image(media_path)
@@ -201,9 +204,8 @@ class AttendanceService:
         if not cap.isOpened():
             return []
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        step = max(1, int(fps * ENROLLMENT_SAMPLE_INTERVAL_S))
+        step = max(1, total_frames // MAX_ENROLLMENT_FRAMES)
         indices = list(range(0, total_frames, step))[:MAX_ENROLLMENT_FRAMES]
 
         frames: list[np.ndarray] = []
@@ -540,6 +542,7 @@ class AttendanceService:
         marked_frame = frame.copy()
         recognized: list[dict] = []
         unknown_faces = 0
+        unknown_faces_detail: list[dict] = []
         store = self._read_store()
         attendance_log = store["attendance"]
 
@@ -597,6 +600,10 @@ class AttendanceService:
                 color = (0, 0, 255)
                 sim = match["similarity"]
                 label = f"Unknown {sim:.2f}"
+                unknown_faces_detail.append({
+                    "bbox": [x1, y1, x2, y2],
+                    "similarity": round(float(sim), 4),
+                })
 
             cv2.rectangle(marked_frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
@@ -615,6 +622,7 @@ class AttendanceService:
         return {
             "recognized": recognized,
             "unknown_faces": unknown_faces,
+            "unknown_faces_detail": unknown_faces_detail,
             "marked_path": str(marked_path),
             "marked_url": f"/api/attendance/artifacts/{marked_name}",
             "roster": self.list_students(),

@@ -13,40 +13,18 @@
         <p class="eyebrow">PRISM AI</p>
         <h1>Classroom Monitoring System</h1>
         <p class="lede">
-          Analyse classroom videos to track per-student engagement using YOLOv8-pose, EAR/MAR signals, head-pose estimation, optical flow, and DeepFace emotion — and mark attendance from a single classroom photo using InsightFace recognition.
+          Mark attendance from a single classroom photo using InsightFace face detection and AdaFace (IR-101) recognition — and analyse classroom videos to track per-student engagement using YOLOv8-pose, EAR/MAR signals, head-pose estimation, optical flow, and DeepFace emotion.
         </p>
       </section>
 
       <section class="tabs-shell">
         <div class="tabs-bar" role="tablist" aria-label="Workspace tabs">
-          <button class="tab-button active" type="button" data-tab-target="classroom-tab" aria-selected="true">Classroom Monitoring</button>
-          <button class="tab-button" type="button" data-tab-target="attendance-tab" aria-selected="false">Attendance</button>
+          <button class="tab-button active" type="button" data-tab-target="attendance-tab" aria-selected="true">Attendance</button>
+          <button class="tab-button" type="button" data-tab-target="classroom-tab" aria-selected="false">Classroom Monitoring</button>
+          <button class="tab-button" type="button" data-tab-target="how-it-works-tab" aria-selected="false">How it Works</button>
         </div>
 
-        <!-- Classroom tab — runs ClassroomPipeline -->
-        <section id="classroom-tab" class="panel tab-panel">
-          <form id="classroom-form" class="upload-form">
-            <label class="file-drop">
-              <input id="classroom-video-input" name="video" type="file" accept="video/*" />
-              <span id="classroom-file-label">Choose a classroom video (up to 60 min)</span>
-            </label>
-            <button type="submit">Analyse classroom</button>
-          </form>
-
-          <div id="classroom-status" class="status">Ready.</div>
-
-          <div id="classroom-results" class="results hidden">
-            <div class="metrics" id="classroom-metrics"></div>
-            <div class="downloads">
-              <a id="classroom-summary-link" href="#" target="_blank" rel="noreferrer">Download summary JSON</a>
-              <a id="classroom-csv-link" href="#" target="_blank" rel="noreferrer">Download CSV</a>
-            </div>
-            <div id="classroom-class-bar" class="cls-attention-bar"></div>
-            <div id="classroom-students" class="cls-students"></div>
-          </div>
-        </section>
-
-        <section id="attendance-tab" class="panel tab-panel hidden">
+        <section id="attendance-tab" class="panel tab-panel">
           <div class="attendance-grid">
             <article class="attendance-card">
               <div class="attendance-card-header">
@@ -111,6 +89,8 @@
               <div id="mark-result" class="attendance-result hidden">
                 <img id="marked-photo-preview" class="marked-photo-preview" alt="Marked classroom photo" />
                 <div id="recognized-list" class="result-list"></div>
+                <button id="unknown-faces-toggle" type="button" class="unknown-faces-toggle hidden"></button>
+                <div id="unknown-faces-grid" class="unknown-faces-grid hidden"></div>
                 <div id="attendance-log-list" class="result-list"></div>
               </div>
             </article>
@@ -118,11 +98,81 @@
             <article class="attendance-card attendance-card-wide">
               <div class="attendance-card-header">
                 <h2>Enrolled students</h2>
-                <p>Current roster loaded from the enrolled embeddings; face detection uses the fine-tuned RetinaFace ONNX model.</p>
+                <p>Current roster loaded from the enrolled embeddings; face detection uses InsightFace (SCRFD) and recognition uses the AdaFace IR-101 backbone.</p>
               </div>
 
               <div id="roster-list" class="roster-list"></div>
               <div id="attendance-log-summary" class="result-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <!-- Classroom tab — runs ClassroomPipeline -->
+        <section id="classroom-tab" class="panel tab-panel hidden">
+          <form id="classroom-form" class="upload-form">
+            <label class="file-drop">
+              <input id="classroom-video-input" name="video" type="file" accept="video/*" />
+              <span id="classroom-file-label">Choose a classroom video (up to 60 min)</span>
+            </label>
+            <button type="submit">Analyse classroom</button>
+          </form>
+
+          <div id="classroom-status" class="status">Ready.</div>
+
+          <div id="classroom-results" class="results hidden">
+            <div class="metrics" id="classroom-metrics"></div>
+            <div class="downloads">
+              <a id="classroom-summary-link" href="#" target="_blank" rel="noreferrer">Download summary JSON</a>
+              <a id="classroom-csv-link" href="#" target="_blank" rel="noreferrer">Download CSV</a>
+            </div>
+            <div id="classroom-class-bar" class="cls-attention-bar"></div>
+            <div id="classroom-students" class="cls-students"></div>
+          </div>
+        </section>
+
+        <section id="how-it-works-tab" class="panel tab-panel hidden">
+          <div class="attendance-grid">
+            <article class="attendance-card attendance-card-wide">
+              <div class="attendance-card-header">
+                <h2>Attendance pipeline</h2>
+                <p>How a classroom photo becomes a marked roster.</p>
+              </div>
+              <ol class="how-it-works-list">
+                <li><strong>Detection</strong> — InsightFace (SCRFD, antelopev2 detector) finds every face in the photo at 1280×1280, returning a bounding box and 5-point landmarks per face.</li>
+                <li><strong>Alignment</strong> — each face is aligned to a canonical 112×112 crop using InsightFace's <code>norm_crop</code>, based on the 5-point landmarks.</li>
+                <li><strong>Recognition</strong> — the aligned crop is embedded with <strong>AdaFace IR-101</strong> (WebFace12M), producing a 512-dimensional, L2-normalised face embedding.</li>
+                <li><strong>Matching</strong> — the embedding is compared via cosine similarity against every enrolled student's stored prototype and individual embeddings. The best match above <strong>0.28</strong> similarity is marked present; everything else is labeled Unknown.</li>
+                <li><strong>Enrollment</strong> — enrollment videos are sampled at up to 30 frames spread evenly across the clip, with an anchor-consistency check to keep only frames of the same person, plus degraded (shrunk-and-upscaled) copies of each frame so the gallery also matches small, distant classroom faces.</li>
+                <li><strong>Unknown faces</strong> — anyone below the match threshold is boxed in red as "Unknown." The "Show unknown faces" button on the Mark attendance card zooms in on each one so a teacher can review and enroll or manually mark them.</li>
+              </ol>
+              <p class="how-it-works-note">
+                AdaFace replaced the previous glintr100/antelopev2 recognition backbone after an offline evaluation showed
+                cleaner separation between genuine and impostor matches on real classroom photos. Detection still uses
+                InsightFace — only the recognition/embedding step changed.
+              </p>
+            </article>
+
+            <article class="attendance-card attendance-card-wide">
+              <div class="attendance-card-header">
+                <h2>Classroom monitoring pipeline</h2>
+                <p>How a classroom video becomes a per-student engagement timeline.</p>
+              </div>
+              <ol class="how-it-works-list">
+                <li><strong>Burst sampling</strong> — every 30 seconds of video, the pipeline grabs a 24-frame burst rather than analysing every frame, keeping a long lecture affordable to process.</li>
+                <li><strong>Detection &amp; tracking</strong> — YOLOv8-pose finds each student's body and keypoints, InsightFace (SCRFD) finds faces and 106-point landmarks, and boxes are linked across the burst by IoU overlap into one track per student.</li>
+                <li><strong>Re-identification</strong> — each track is embedded with <strong>AdaFace IR-101</strong> (the same backbone as Attendance) and resolved against students seen in earlier windows as a one-to-one assignment per burst (&ge; 0.35 similarity) — so two different people visible in the same burst can never both be assigned to the same identity, which a simpler one-at-a-time match used to allow.</li>
+                <li><strong>Roster recognition</strong> — the same embedding is also checked, read-only, against the enrolled Attendance roster (&ge; 0.35 similarity, with a margin over the runner-up candidate). A confident match shows the real name instead of an anonymous "student_00N" label, and two anonymous IDs that both match the same enrolled student get merged into one timeline.</li>
+                <li><strong>Signal extraction</strong> — per window: 106-point facial landmarks (InsightFace) drive mouth open/closed tracking and head yaw/pitch; YOLO for phone detection; optical flow for motion; DeepFace for dominant emotion.</li>
+                <li><strong>Action classification</strong> — a priority ruleset turns those signals into one label per window: On Phone &rarr; Sleeping &rarr; Writing &rarr; Talking &rarr; Attentive &rarr; otherwise Distracted. "Attentive" is driven by mouth-closed percentage (&ge; 80%) — a calibration pass against a labeled reference dataset found eye-openness (EAR) had no measurable correlation with attentiveness, while mouth state separated attentive from non-attentive clips much more cleanly.</li>
+                <li><strong>Engagement rollup</strong> — the fraction of attentive windows becomes an overall attention level per student: High (&ge; 70%), Medium (&ge; 40%), or Low, alongside a short saved clip per window.</li>
+              </ol>
+              <p class="how-it-works-note">
+                Known limitations: phone detection currently finds close to none of the real phones in testing —
+                it's a generic, un-fine-tuned COCO model and needs replacing rather than re-tuning. Attentive/not-
+                attentive classification runs at roughly 67&ndash;70% accuracy against a 156-clip labeled reference
+                set — a real improvement over the previous EAR-based approach (which had no discriminative power
+                at all), but not a solved problem.
+              </p>
             </article>
           </div>
         </section>
