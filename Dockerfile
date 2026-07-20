@@ -27,7 +27,7 @@ RUN python download_models.py
 
 # Download demo classroom image from GitHub
 RUN curl -fL -o /app/activity_web/backend/static/demo_classroom.jpg \
-    "https://raw.githubusercontent.com/PixxySynchronous/PRISM-AI-REPO/main/activity_web/backend/static/demo_classroom.jpg"
+    "https://raw.githubusercontent.com/PixxySynchronous/Face-Recognition-Attendance-Classroom-Monitoring-System/main/activity_web/backend/static/demo_classroom.jpg"
 
 RUN mkdir -p /app/runtime/uploads /app/runtime/outputs /app/runtime/attendance
 
