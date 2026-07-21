@@ -7,7 +7,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
-from .attendance_service import get_attendance_service
+from .attendance_service import get_attendance_service, migrate_legacy_flat_store, CLASSROOMS, CLASSROOM_LABELS
 from .pipeline_loader import get_pipeline
 from .engagement_loader import get_engagement_pipeline
 from .cognitive_loader import get_cognitive_pipeline
@@ -31,6 +31,11 @@ app = Flask(
     static_folder=str(BACKEND_DIR / "static"),
 )
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024
+
+try:
+    migrate_legacy_flat_store()
+except Exception:
+    pass
 
 
 def ensure_runtime_dirs() -> None:
@@ -72,9 +77,30 @@ def attendance_artifact_url(filename: str) -> str:
     return f"/api/attendance/artifacts/{filename}"
 
 
+def _require_classroom(classroom_id: str | None):
+    """Validate a classroom id against the fixed whitelist. Returns None on
+    success, or a (response, status) tuple to return immediately on failure."""
+    if classroom_id not in CLASSROOMS:
+        return jsonify({"ok": False, "error": "Select a valid classroom."}), 400
+    return None
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/enroll")
+def enroll_page():
+    return render_template("enroll.html")
+
+
+@app.get("/api/attendance/classrooms")
+def attendance_classrooms():
+    return jsonify({
+        "ok": True,
+        "classrooms": [{"id": c, "label": CLASSROOM_LABELS[c]} for c in CLASSROOMS],
+    })
 
 
 @app.get("/api/health")
@@ -84,8 +110,11 @@ def health():
 
 @app.get("/api/attendance/roster")
 def attendance_roster():
+    classroom_id = request.args.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
     try:
-        service = get_attendance_service()
+        service = get_attendance_service(classroom_id)
         return jsonify({"ok": True, "students": service.list_students(), "attendance": service.list_attendance(limit=20)})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -93,7 +122,10 @@ def attendance_roster():
 
 @app.delete("/api/attendance/students/<student_id>")
 def attendance_delete_student(student_id: str):
-    service = get_attendance_service()
+    classroom_id = request.args.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+    service = get_attendance_service(classroom_id)
     try:
         result = service.delete_student(student_id)
     except KeyError:
@@ -104,8 +136,35 @@ def attendance_delete_student(student_id: str):
     return jsonify({"ok": True, **result})
 
 
+@app.post("/api/attendance/suspicious/resolve")
+def attendance_resolve_suspicious():
+    data = request.get_json(silent=True) or {}
+    classroom_id = data.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
+    review_id = str(data.get("review_id", "")).strip()
+    confirmed = bool(data.get("confirmed"))
+    if not review_id:
+        return jsonify({"ok": False, "error": "Missing review_id."}), 400
+
+    service = get_attendance_service(classroom_id)
+    try:
+        result = service.resolve_suspicious_review(review_id, confirmed)
+    except KeyError:
+        return jsonify({"ok": False, "error": "That review no longer exists (already resolved?)."}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": True, **result})
+
+
 @app.post("/api/attendance/enroll")
 def attendance_enroll():
+    classroom_id = request.form.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
     uploaded_files = request.files.getlist("media")
     student_name = request.form.get("student_name", "").strip()
 
@@ -114,7 +173,7 @@ def attendance_enroll():
     if not uploaded_files:
         return jsonify({"ok": False, "error": "Upload at least one photo or video."}), 400
 
-    service = get_attendance_service()
+    service = get_attendance_service(classroom_id)
     saved_paths: list[Path] = []
     for uploaded_file in uploaded_files:
         if not uploaded_file or not uploaded_file.filename:
@@ -142,6 +201,10 @@ def attendance_enroll():
 def attendance_enroll_folder():
     """Enroll a student from a local folder of videos/images (no upload needed)."""
     data = request.get_json(silent=True) or {}
+    classroom_id = data.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
     student_name = data.get("student_name", "").strip()
     folder_path  = data.get("folder_path", "").strip()
 
@@ -161,7 +224,7 @@ def attendance_enroll_folder():
     if not media_paths:
         return jsonify({"ok": False, "error": "No video or image files found in that folder."}), 400
 
-    service = get_attendance_service()
+    service = get_attendance_service(classroom_id)
     try:
         result = service.enroll_student(student_name=student_name, media_paths=media_paths)
     except Exception as exc:
@@ -174,6 +237,10 @@ def attendance_enroll_folder():
 
 @app.post("/api/attendance/mark")
 def attendance_mark():
+    classroom_id = request.form.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
     uploaded_file = request.files.get("photo")
     if uploaded_file is None or not uploaded_file.filename:
         return jsonify({"ok": False, "error": "Upload a classroom photo first."}), 400
@@ -181,7 +248,7 @@ def attendance_mark():
     if not allowed_media(uploaded_file.filename):
         return jsonify({"ok": False, "error": "Use an image or video file for attendance marking."}), 400
 
-    service = get_attendance_service()
+    service = get_attendance_service(classroom_id)
     photo_name = secure_filename(uploaded_file.filename)
     photo_path = ATTENDANCE_DIR / "uploads" / f"{uuid.uuid4().hex[:12]}_{photo_name}"
     photo_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,12 +266,16 @@ def attendance_mark():
 
 @app.post("/api/attendance/demo")
 def attendance_demo():
+    classroom_id = request.form.get("classroom") or request.args.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
     import shutil
     demo_src = Path(__file__).parent / "static" / "demo_classroom.jpg"
     if not demo_src.exists():
         return jsonify({"ok": False, "error": "Demo image not found."}), 404
 
-    service = get_attendance_service()
+    service = get_attendance_service(classroom_id)
     photo_path = ATTENDANCE_DIR / "uploads" / "demo_classroom.jpg"
     photo_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(demo_src, photo_path)

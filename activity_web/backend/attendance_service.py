@@ -19,12 +19,39 @@ from utils.adaface_backbone import AdaFaceWrapper, DEFAULT_CKPT_PATH as ADAFACE_
 
 UPLOAD_DIR = ATTENDANCE_DIR / "uploads"
 MARKED_DIR = ATTENDANCE_DIR / "marked"
-STORE_PATH = ATTENDANCE_DIR / "attendance_store.json"
 PHOTOS_PER_VIDEO = 32
+
+# Fixed whitelist of valid classrooms — every roster is scoped to one of these.
+# Always validate a classroom id against this list before it touches a file path.
+CLASSROOMS = [f"cse{i}" for i in range(1, 9)]
+CLASSROOM_LABELS = {c: f"CSE {c[3:]}" for c in CLASSROOMS}
+
+
+def _store_path(classroom_id: str) -> Path:
+    if classroom_id not in CLASSROOMS:
+        raise ValueError(f"Unknown classroom: {classroom_id!r}")
+    return ATTENDANCE_DIR / f"attendance_store_{classroom_id}.json"
+
+
+def migrate_legacy_flat_store() -> None:
+    """One-time migration: this app used to have a single flat attendance_store.json
+    shared by everyone. If it still exists and CSE 8's file doesn't, copy it over —
+    the students originally enrolled there all belong to CSE 8."""
+    legacy_path = ATTENDANCE_DIR / "attendance_store.json"
+    cse8_path = _store_path("cse8")
+    if legacy_path.exists() and not cse8_path.exists():
+        cse8_path.parent.mkdir(parents=True, exist_ok=True)
+        cse8_path.write_text(legacy_path.read_text())
 # AdaFace IR-101's own p99 impostor threshold, derived from the human-labeled
 # clean eval set (eval/impostor_scope_eval.py) — NOT glintr100's 0.38, the two
-# backbones' cosine distributions aren't comparable.
+# backbones' cosine distributions aren't comparable. Below this, a face gets no
+# name candidate at all ("Unknown").
 FACE_SIMILARITY_THRESHOLD = 0.28
+# At/above this, a match counts as confidently "Present". Between
+# FACE_SIMILARITY_THRESHOLD and this, it's a real name candidate but not
+# confident enough to auto-confirm — surfaced as "Suspicious" for a teacher
+# to eyeball, rather than silently trusted or silently discarded.
+PRESENT_SIMILARITY_THRESHOLD = 0.30
 EMBEDDING_MODEL_NAME = "adaface_ir101_webface12m"
 ENROLLMENT_MIN_DET_SCORE = 0.50
 # Unchanged from glintr100: eval/build_gallery.py mirrors production enrollment
@@ -127,32 +154,45 @@ class FaceSample:
     score: float
 
 
+@lru_cache(maxsize=1)
+def _get_face_models() -> tuple[FaceAnalysis, AdaFaceWrapper]:
+    """Load the shared, expensive ML models once — every classroom's
+    AttendanceService reuses the same instances, only the roster JSON differs."""
+    face_analysis = FaceAnalysis(
+        name="antelopev2",
+        allowed_modules=["detection"],
+        providers=["CPUExecutionProvider"],
+    )
+    face_analysis.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.5)
+    adaface = AdaFaceWrapper.load(ADAFACE_CKPT_PATH)
+    return face_analysis, adaface
+
+
 class AttendanceService:
-    def __init__(self) -> None:
+    def __init__(self, classroom_id: str) -> None:
+        if classroom_id not in CLASSROOMS:
+            raise ValueError(f"Unknown classroom: {classroom_id!r}")
+        self.classroom_id = classroom_id
+        self.store_path = _store_path(classroom_id)
         ensure_attendance_dirs()
-        self.face_analysis = FaceAnalysis(
-            name="antelopev2",
-            allowed_modules=["detection"],
-            providers=["CPUExecutionProvider"],
-        )
-        self.face_analysis.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.5)
-        self.adaface = AdaFaceWrapper.load(ADAFACE_CKPT_PATH)
+        self.face_analysis, self.adaface = _get_face_models()
         self._migrate_legacy_embeddings_if_needed()
 
     def _read_store(self) -> dict:
-        if not STORE_PATH.exists():
-            return {"students": [], "attendance": []}
+        if not self.store_path.exists():
+            return {"students": [], "attendance": [], "pending_reviews": []}
         try:
-            data = json.loads(STORE_PATH.read_text())
+            data = json.loads(self.store_path.read_text())
         except Exception:
-            return {"students": [], "attendance": []}
+            return {"students": [], "attendance": [], "pending_reviews": []}
         data.setdefault("students", [])
         data.setdefault("attendance", [])
+        data.setdefault("pending_reviews", [])
         return data
 
     def _write_store(self, data: dict) -> None:
-        ATTENDANCE_DIR.mkdir(parents=True, exist_ok=True)
-        STORE_PATH.write_text(json.dumps(data, indent=2))
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        self.store_path.write_text(json.dumps(data, indent=2))
 
     def _load_image(self, media_path: Path) -> np.ndarray | None:
         image = cv2.imread(str(media_path))
@@ -192,9 +232,23 @@ class AttendanceService:
 
     def _sample_frames_for_enrollment(self, media_path: Path) -> list[np.ndarray]:
         """Sample up to MAX_ENROLLMENT_FRAMES frames, spread evenly across the
-        whole clip. Deriving the step from total_frames (rather than a fixed
-        per-second interval) means short clips still yield close to the target
-        frame count instead of being starved by their length."""
+        whole clip, by decoding sequentially and subsampling afterward —
+        never by seeking.
+
+        This used to seek to computed positions (via CAP_PROP_POS_FRAMES),
+        trusting CAP_PROP_FRAME_COUNT to know where those positions were. Both
+        turned out to be unreliable for webm/matroska files recorded live by a
+        browser's MediaRecorder, which streams encoded clusters via
+        ondataavailable and never goes back to write a finalized duration/seek
+        index: the reported frame count can be garbage (even negative), and —
+        the harder-to-catch failure — even when seeking *looks* like it
+        succeeded (returns frames, no error), sparse keyframes in a live
+        VP8/VP9 stream mean it can silently keep landing on the same handful
+        of early frames instead of actually spreading across the clip. A short
+        enrollment clip is cheap to fully decode, so there's no real reason to
+        seek at all here — only mark_attendance's _sample_video_frames (much
+        less frequently hit, and normally handed a still photo anyway) keeps
+        the seek-based path."""
         suffix = media_path.suffix.lower()
         if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
             image = self._load_image(media_path)
@@ -204,18 +258,24 @@ class AttendanceService:
         if not cap.isOpened():
             return []
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        step = max(1, total_frames // MAX_ENROLLMENT_FRAMES)
-        indices = list(range(0, total_frames, step))[:MAX_ENROLLMENT_FRAMES]
-
-        frames: list[np.ndarray] = []
-        for idx in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        # Flat cap generous enough for any realistic enrollment recording
+        # (~100s at 30fps) regardless of what the container's own metadata
+        # claims about duration/frame count.
+        all_frames: list[np.ndarray] = []
+        read_cap = 3000
+        while len(all_frames) < read_cap:
             ok, frame = cap.read()
-            if ok and frame is not None:
-                frames.append(frame)
+            if not ok or frame is None:
+                break
+            all_frames.append(frame)
         cap.release()
-        return frames
+
+        if not all_frames:
+            return []
+        if len(all_frames) <= MAX_ENROLLMENT_FRAMES:
+            return all_frames
+        pick = np.linspace(0, len(all_frames) - 1, MAX_ENROLLMENT_FRAMES, dtype=int)
+        return [all_frames[i] for i in pick]
 
     def _detect_samples(self, frame: np.ndarray) -> list[FaceSample]:
         faces = self.face_analysis.get(frame)
@@ -522,6 +582,58 @@ class AttendanceService:
 
         return {"match": self._student_public(best_student), "similarity": best_similarity}
 
+    def _add_embedding_to_gallery(self, store: dict, student_id: str, embedding: np.ndarray) -> None:
+        """Append an embedding to a student's stored gallery and recompute
+        their prototype. Shared by mark_attendance's automatic high-confidence
+        growth and by a teacher manually confirming a suspicious match."""
+        for s in store.get("students", []):
+            if s.get("student_id") == student_id:
+                stored = s.get("embeddings", []) or []
+                new_emb = _normalize(embedding).tolist()
+                stored = (stored + [new_emb])[-MAX_STORED_EMBEDDINGS:]
+                s["embeddings"] = stored
+                mat = np.asarray(stored, dtype=np.float32)
+                s["prototype"] = _normalize(mat.mean(axis=0)).tolist()
+                # observations is a lifetime counter (unlike embeddings, which is
+                # capped and can evict old entries) — keep it moving so the
+                # roster UI visibly reflects that this reinforced the gallery.
+                s["observations"] = int(s.get("observations", 0)) + 1
+                s["updated_at"] = _now_iso()
+                break
+
+    def resolve_suspicious_review(self, review_id: str, confirmed: bool) -> dict:
+        """A teacher confirming or rejecting a 'suspicious' match from
+        mark_attendance. Confirming reinforces the model — the embedding that
+        triggered the suspicious match gets added to that student's gallery,
+        the same way a high-confidence classroom match already does — and
+        records the student as present. Rejecting just discards the pending
+        review; nothing is added anywhere, since a wrong name is worse to
+        learn from than a merely uncertain one."""
+        store = self._read_store()
+        pending = store.get("pending_reviews", [])
+
+        review = next((r for r in pending if r.get("review_id") == review_id), None)
+        if review is None:
+            raise KeyError(f"No pending review: {review_id}")
+        store["pending_reviews"] = [r for r in pending if r.get("review_id") != review_id]
+
+        if confirmed:
+            embedding = np.asarray(review["embedding"], dtype=np.float32)
+            self._add_embedding_to_gallery(store, review["student_id"], embedding)
+            store["attendance"].append({
+                "student_name": review["student_name"],
+                "recognized_at": _now_iso(),
+                "source": "classroom_photo_confirmed",
+                "confidence": review["similarity"],
+            })
+
+        self._write_store(store)
+        return {
+            "confirmed": confirmed,
+            "student_name": review["student_name"],
+            "roster": self.list_students(),
+        }
+
     def mark_attendance(self, media_path: Path) -> dict:
         if not media_path.exists():
             raise FileNotFoundError(f"File not found: {media_path}")
@@ -540,7 +652,8 @@ class AttendanceService:
 
         detections = self._detect_samples(frame)
         marked_frame = frame.copy()
-        recognized: list[dict] = []
+        present: list[dict] = []
+        suspicious: list[dict] = []
         unknown_faces = 0
         unknown_faces_detail: list[dict] = []
         store = self._read_store()
@@ -551,7 +664,7 @@ class AttendanceService:
 
         # Per student: keep only the single highest-scoring face
         # so if two faces both exceed the threshold for the same student,
-        # only the best one gets the green box — the other stays Unknown.
+        # only the best one gets boxed — the other stays Unknown.
         best_per_student: dict[str, tuple] = {}
         for det, match in all_matches:
             if match["match"] is not None:
@@ -560,6 +673,7 @@ class AttendanceService:
                     best_per_student[name] = (det, match["similarity"], match)
 
         best_det_ids = {id(det) for det, _, _ in best_per_student.values()}
+        seen_student_ids: set[str] = set()
 
         for det, match in all_matches:
             x1, y1, x2, y2 = det.bbox
@@ -567,34 +681,47 @@ class AttendanceService:
 
             if is_best:
                 student = match["match"]
-                color = (0, 200, 0)
-                label = f"{student['name']} {match['similarity']:.2f}"
-                if student["name"] not in {r["student"]["name"] for r in recognized}:
-                    attendance_log.append({
-                        "student_name": student["name"],
-                        "recognized_at": _now_iso(),
-                        "source": "classroom_photo",
-                        "confidence": round(float(match["similarity"]), 4),
-                    })
-                    recognized.append({
-                        "student": student,
-                        "confidence": round(float(match["similarity"]), 4),
-                        "bbox": [x1, y1, x2, y2],
-                    })
-                    # Incremental gallery growth: high-confidence classroom embeddings
-                    # are added to the student's gallery so future matches improve.
-                    if match["similarity"] >= 0.60:
-                        all_students = store.get("students", [])
-                        for s in all_students:
-                            if s.get("student_id") == student.get("student_id"):
-                                stored = s.get("embeddings", []) or []
-                                new_emb = _normalize(det.embedding).tolist()
-                                stored = (stored + [new_emb])[-MAX_STORED_EMBEDDINGS:]
-                                s["embeddings"] = stored
-                                # Recompute prototype
-                                mat = np.asarray(stored, dtype=np.float32)
-                                s["prototype"] = _normalize(mat.mean(axis=0)).tolist()
-                                break
+                similarity = match["similarity"]
+                is_present = similarity >= PRESENT_SIMILARITY_THRESHOLD
+                color = (0, 200, 0) if is_present else (0, 165, 255)  # green vs. amber (BGR)
+                tag = "" if is_present else " (suspicious)"
+                label = f"{student['name']} {similarity:.2f}{tag}"
+
+                if student["student_id"] not in seen_student_ids:
+                    seen_student_ids.add(student["student_id"])
+                    entry = {"student": student, "confidence": round(float(similarity), 4), "bbox": [x1, y1, x2, y2]}
+                    if is_present:
+                        present.append(entry)
+                        # Only confident matches get written to the attendance record —
+                        # a "suspicious" match is a candidate for a teacher to review,
+                        # not something to silently record as confirmed attendance.
+                        attendance_log.append({
+                            "student_name": student["name"],
+                            "recognized_at": _now_iso(),
+                            "source": "classroom_photo",
+                            "confidence": round(float(similarity), 4),
+                        })
+                        # Incremental gallery growth: high-confidence classroom embeddings
+                        # are added to the student's gallery so future matches improve.
+                        if similarity >= 0.60:
+                            self._add_embedding_to_gallery(store, student["student_id"], det.embedding)
+                    else:
+                        # Hold the embedding behind a review_id rather than acting on
+                        # it now — a teacher confirming/rejecting it is what decides
+                        # whether it reinforces this student's gallery (see
+                        # resolve_suspicious_review). Not returned in the API
+                        # response itself; only the review_id is.
+                        review_id = uuid.uuid4().hex
+                        store.setdefault("pending_reviews", []).append({
+                            "review_id": review_id,
+                            "student_id": student["student_id"],
+                            "student_name": student["name"],
+                            "similarity": round(float(similarity), 4),
+                            "embedding": _normalize(det.embedding).tolist(),
+                            "created_at": _now_iso(),
+                        })
+                        entry["review_id"] = review_id
+                        suspicious.append(entry)
             else:
                 unknown_faces += 1
                 color = (0, 0, 255)
@@ -612,6 +739,13 @@ class AttendanceService:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA,
             )
 
+        # Everyone enrolled in this classroom who wasn't matched at all (present
+        # or suspicious) in this photo.
+        absent = [
+            self._student_public(s) for s in store.get("students", [])
+            if s.get("student_id") not in seen_student_ids
+        ]
+
         store["attendance"] = attendance_log
         self._write_store(store)
 
@@ -620,21 +754,22 @@ class AttendanceService:
         cv2.imwrite(str(marked_path), marked_frame)
 
         return {
-            "recognized": recognized,
+            "present": present,
+            "suspicious": suspicious,
+            "absent": absent,
             "unknown_faces": unknown_faces,
             "unknown_faces_detail": unknown_faces_detail,
             "marked_path": str(marked_path),
             "marked_url": f"/api/attendance/artifacts/{marked_name}",
             "roster": self.list_students(),
-            "attendance_log": self.list_attendance(limit=20),
         }
 
 
-@lru_cache(maxsize=1)
-def get_attendance_service() -> AttendanceService:
+@lru_cache(maxsize=None)
+def get_attendance_service(classroom_id: str) -> AttendanceService:
     # Fix nested insightface model folders if present before initializing
     try:
         ensure_insightface_models_flat(["antelopev2"])
     except Exception:
         pass
-    return AttendanceService()
+    return AttendanceService(classroom_id)

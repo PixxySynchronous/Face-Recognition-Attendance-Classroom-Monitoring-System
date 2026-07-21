@@ -9,6 +9,8 @@ function activateTab(tabId) {
     btn.setAttribute("aria-selected", String(active));
   });
   tabPanels.forEach((panel) => panel.classList.toggle("hidden", panel.id !== tabId));
+  // Refresh the roster in case a student was just enrolled from the other tab.
+  if (tabId === "attendance-tab") refreshAttendanceSummary();
 }
 tabButtons.forEach((btn) => btn.addEventListener("click", () => activateTab(btn.dataset.tabTarget)));
 
@@ -130,7 +132,64 @@ function renderClassroomStudents(students) {
   }).join("");
 }
 
-// ── Attendance tab ─────────────────────────────────────────────────────────────
+// ── Attendance tab: classroom picker ─────────────────────────────────────────
+const classroomSelect        = document.getElementById("classroom-select");
+const rosterClassroomLabel   = document.getElementById("roster-classroom-label");
+let currentClassroomId = null;
+
+function updateRosterClassroomLabel() {
+  const label = classroomSelect.options[classroomSelect.selectedIndex]?.textContent || "";
+  rosterClassroomLabel.textContent = label;
+}
+
+async function loadClassrooms() {
+  try {
+    const response = await fetch("/api/attendance/classrooms");
+    const data = await response.json();
+    if (!data.ok || !data.classrooms.length) throw new Error(data.error || "No classrooms available.");
+    classroomSelect.innerHTML = data.classrooms.map((c) => `<option value="${c.id}">${c.label}</option>`).join("");
+    const saved = localStorage.getItem("prism_classroom");
+    currentClassroomId = (saved && data.classrooms.some((c) => c.id === saved)) ? saved : data.classrooms[0].id;
+    classroomSelect.value = currentClassroomId;
+    updateRosterClassroomLabel();
+    await refreshAttendanceSummary();
+  } catch (err) {
+    console.error("Failed to load classrooms:", err);
+  }
+}
+
+classroomSelect.addEventListener("change", async () => {
+  currentClassroomId = classroomSelect.value;
+  localStorage.setItem("prism_classroom", currentClassroomId);
+  updateRosterClassroomLabel();
+  markResult.classList.add("hidden");
+  await refreshAttendanceSummary();
+});
+
+// ── Enroll Student tab: its own independent classroom picker ────────────────
+const enrollClassroomSelect = document.getElementById("enroll-classroom-select");
+let currentEnrollClassroomId = null;
+
+async function loadEnrollClassrooms() {
+  try {
+    const response = await fetch("/api/attendance/classrooms");
+    const data = await response.json();
+    if (!data.ok || !data.classrooms.length) throw new Error(data.error || "No classrooms available.");
+    enrollClassroomSelect.innerHTML = data.classrooms.map((c) => `<option value="${c.id}">${c.label}</option>`).join("");
+    const saved = localStorage.getItem("prism_classroom");
+    currentEnrollClassroomId = (saved && data.classrooms.some((c) => c.id === saved)) ? saved : data.classrooms[0].id;
+    enrollClassroomSelect.value = currentEnrollClassroomId;
+  } catch (err) {
+    console.error("Failed to load classrooms:", err);
+  }
+}
+
+enrollClassroomSelect.addEventListener("change", () => {
+  currentEnrollClassroomId = enrollClassroomSelect.value;
+  localStorage.setItem("prism_classroom", currentEnrollClassroomId);
+});
+
+// ── Enroll Student tab ────────────────────────────────────────────────────────
 const enrollForm        = document.getElementById("enroll-form");
 const studentNameInput  = document.getElementById("student-name-input");
 const enrollMediaInput  = document.getElementById("enroll-media-input");
@@ -144,10 +203,10 @@ const classroomPhotoLabel = document.getElementById("classroom-photo-label");
 const markStatus        = document.getElementById("mark-status");
 const markResult        = document.getElementById("mark-result");
 const markedPhotoPreview= document.getElementById("marked-photo-preview");
-const recognizedList    = document.getElementById("recognized-list");
-const attendanceLogList = document.getElementById("attendance-log-list");
+const presentList       = document.getElementById("present-list");
+const suspiciousList    = document.getElementById("suspicious-list");
+const absentList        = document.getElementById("absent-list");
 const rosterList        = document.getElementById("roster-list");
-const attendanceLogSummary = document.getElementById("attendance-log-summary");
 
 enrollMediaInput.addEventListener("change", () => {
   enrollMediaLabel.textContent = selectedFileText(enrollMediaInput.files, "Choose photos or videos for enrollment");
@@ -158,12 +217,23 @@ classroomPhotoInput.addEventListener("change", () => {
 
 // Enrollment tab toggle
 let enrollTab = "files";
+let enrollCameraRecorder = null;
 function switchEnrollTab(tab) {
+  const previousTab = enrollTab;
   enrollTab = tab;
   document.getElementById("enroll-tab-files").style.display  = tab === "files"  ? "" : "none";
   document.getElementById("enroll-tab-folder").style.display = tab === "folder" ? "" : "none";
+  document.getElementById("enroll-tab-camera").style.display = tab === "camera" ? "" : "none";
   document.getElementById("tab-files").classList.toggle("tab-active",  tab === "files");
   document.getElementById("tab-folder").classList.toggle("tab-active", tab === "folder");
+  document.getElementById("tab-camera").classList.toggle("tab-active", tab === "camera");
+
+  if (tab === "camera" && !enrollCameraRecorder) {
+    enrollCameraRecorder = CameraRecorder.create(document.getElementById("enroll-camera-recorder"));
+  }
+  if (previousTab === "camera" && tab !== "camera" && enrollCameraRecorder) {
+    enrollCameraRecorder.stopStream();
+  }
 }
 
 enrollForm.addEventListener("submit", async (event) => {
@@ -184,13 +254,24 @@ enrollForm.addEventListener("submit", async (event) => {
       response = await fetch("/api/attendance/enroll-folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ student_name: studentName, folder_path: folderPath }),
+        body: JSON.stringify({ classroom: currentEnrollClassroomId, student_name: studentName, folder_path: folderPath }),
       });
       data = await response.json();
       if (data.ok) enrollStatus.textContent = `Enrolled ${data.student.name} from ${data.files_used} file(s).`;
+    } else if (enrollTab === "camera") {
+      const blob = enrollCameraRecorder && enrollCameraRecorder.getBlob();
+      if (!blob) { enrollStatus.textContent = "Record a video first."; enrollStatus.classList.add("error"); btn.disabled = false; return; }
+      const payload = new FormData();
+      payload.append("classroom", currentEnrollClassroomId);
+      payload.append("student_name", studentName);
+      payload.append("media", blob, "recording.webm");
+      response = await fetch("/api/attendance/enroll", { method: "POST", body: payload });
+      data = await response.json();
+      if (data.ok) { enrollStatus.textContent = `Enrolled ${data.student.name} successfully.`; enrollCameraRecorder.reset(); }
     } else {
       if (!enrollMediaInput.files.length) { enrollStatus.textContent = "Upload at least one photo or video."; enrollStatus.classList.add("error"); btn.disabled = false; return; }
       const payload = new FormData();
+      payload.append("classroom", currentEnrollClassroomId);
       payload.append("student_name", studentName);
       Array.from(enrollMediaInput.files).forEach((f) => payload.append("media", f));
       response = await fetch("/api/attendance/enroll", { method: "POST", body: payload });
@@ -198,9 +279,8 @@ enrollForm.addEventListener("submit", async (event) => {
       if (data.ok) enrollStatus.textContent = `Enrolled ${data.student.name} successfully.`;
     }
     if (!response.ok || !data.ok) throw new Error(data.error || "Enrollment failed.");
-    renderRoster(data.students || []);
     renderEnrollmentResult(data.student, data.media_samples || []);
-    await refreshAttendanceSummary();
+    if (currentEnrollClassroomId === currentClassroomId) await refreshAttendanceSummary();
   } catch (err) {
     enrollStatus.textContent = err.message;
     enrollStatus.classList.add("error");
@@ -212,6 +292,7 @@ markForm.addEventListener("submit", async (event) => {
   if (!classroomPhotoInput.files.length) { markStatus.textContent = "Upload a classroom photo first."; markStatus.classList.add("error"); return; }
   const btn = markForm.querySelector("button[type='submit']");
   const payload = new FormData();
+  payload.append("classroom", currentClassroomId);
   payload.append("photo", classroomPhotoInput.files[0]);
   markStatus.classList.remove("error");
   markStatus.textContent = "Detecting faces and marking attendance...";
@@ -221,12 +302,10 @@ markForm.addEventListener("submit", async (event) => {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Attendance marking failed.");
     renderMarkedPhoto(data.marked_url);
-    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
-    renderAttendanceLog(data.attendance_log || []);
+    renderAttendanceBuckets(data.present || [], data.suspicious || [], data.absent || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderRoster(data.roster || []);
-    markStatus.textContent = `Marked ${data.recognized.length} student${data.recognized.length === 1 ? "" : "s"}.`;
+    markStatus.textContent = `${data.present.length} present, ${data.suspicious.length} suspicious, ${data.absent.length} absent.`;
     markResult.classList.remove("hidden");
-    await refreshAttendanceSummary();
   } catch (err) {
     markStatus.textContent = err.message;
     markStatus.classList.add("error");
@@ -238,8 +317,9 @@ document.getElementById("demo-preview-btn").addEventListener("click", () => {
   markStatus.textContent = "Demo classroom photo — original, no annotations.";
   markedPhotoPreview.src = "/static/demo_classroom.jpg";
   markResult.classList.remove("hidden");
-  recognizedList.innerHTML = "";
-  attendanceLogList.innerHTML = "";
+  presentList.innerHTML = "";
+  suspiciousList.innerHTML = "";
+  absentList.innerHTML = "";
   hideUnknownFacesUI();
 });
 
@@ -255,15 +335,13 @@ document.getElementById("demo-btn").addEventListener("click", async () => {
 
   // Step 2 — run the pipeline
   try {
-    const response = await fetch("/api/attendance/demo", { method: "POST" });
+    const response = await fetch(`/api/attendance/demo?classroom=${encodeURIComponent(currentClassroomId)}`, { method: "POST" });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Demo failed.");
     renderMarkedPhoto(data.marked_url);
-    renderRecognizedFaces(data.recognized || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
-    renderAttendanceLog(data.attendance_log || []);
+    renderAttendanceBuckets(data.present || [], data.suspicious || [], data.absent || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderRoster(data.roster || []);
-    markStatus.textContent = `Demo complete — ${data.recognized.length} student${data.recognized.length === 1 ? "" : "s"} recognized.`;
-    await refreshAttendanceSummary();
+    markStatus.textContent = `Demo complete — ${data.present.length} present, ${data.suspicious.length} suspicious, ${data.absent.length} absent.`;
   } catch (err) {
     markStatus.textContent = err.message;
     markStatus.classList.add("error");
@@ -271,10 +349,11 @@ document.getElementById("demo-btn").addEventListener("click", async () => {
 });
 
 async function refreshAttendanceSummary() {
+  if (!currentClassroomId) return;
   try {
-    const response = await fetch("/api/attendance/roster");
+    const response = await fetch(`/api/attendance/roster?classroom=${encodeURIComponent(currentClassroomId)}`);
     const data = await response.json();
-    if (response.ok && data.ok) { renderRoster(data.students || []); renderAttendanceSummary(data.attendance || []); }
+    if (response.ok && data.ok) renderRoster(data.students || []);
   } catch (e) { console.error(e); }
 }
 
@@ -297,17 +376,29 @@ const unknownFacesGrid   = document.getElementById("unknown-faces-grid");
 let currentUnknownFaces  = [];
 let unknownFacesExpanded = false;
 
-function renderRecognizedFaces(recognized, unknownFaces, unknownFacesDetail) {
-  const names = recognized.map((e) => e.student.name);
-  const summary = names.length
-    ? `<div class="result-summary">${names.length} present: ${names.join(", ")}</div>`
-    : `<div class="result-summary muted">0 present</div>`;
+function renderAttendanceBuckets(present, suspicious, absent, unknownFaces, unknownFacesDetail) {
+  presentList.innerHTML = `<h3>Present (${present.length})</h3>
+    ${present.length
+      ? present.map((e) => `<div class="result-item present-item"><strong>${e.student.name}</strong><span>Confidence ${formatNumber(e.confidence)}</span></div>`).join("")
+      : '<div class="result-item muted">No students confidently recognized.</div>'}`;
 
-  recognizedList.innerHTML = `<h3>Recognized faces</h3>
-    ${summary}
-    ${recognized.length
-      ? recognized.map((e) => `<div class="result-item"><strong>${e.student.name}</strong><span>Confidence ${formatNumber(e.confidence)}</span></div>`).join("")
-      : '<div class="result-item muted">No enrolled students recognized.</div>'}`;
+  suspiciousList.innerHTML = `<h3>Suspicious (${suspicious.length})</h3>
+    ${suspicious.length
+      ? suspicious.map((e) => `
+        <div class="result-item suspicious-item" data-review-id="${e.review_id}">
+          <strong>${e.student.name}</strong>
+          <span>Confidence ${formatNumber(e.confidence)} — please verify</span>
+          <div class="suspicious-actions">
+            <button type="button" class="suspicious-btn suspicious-confirm-btn" data-review-id="${e.review_id}">Yes, it's them</button>
+            <button type="button" class="suspicious-btn suspicious-reject-btn" data-review-id="${e.review_id}">Not them</button>
+          </div>
+        </div>`).join("")
+      : '<div class="result-item muted">None.</div>'}`;
+
+  absentList.innerHTML = `<h3>Absent (${absent.length})</h3>
+    ${absent.length
+      ? absent.map((s) => `<div class="result-item absent-item"><strong>${s.name}</strong></div>`).join("")
+      : '<div class="result-item muted">Everyone enrolled was seen.</div>'}`;
 
   currentUnknownFaces = unknownFacesDetail || [];
   unknownFacesExpanded = false;
@@ -321,6 +412,43 @@ function renderRecognizedFaces(recognized, unknownFaces, unknownFacesDetail) {
     unknownFacesToggle.classList.add("hidden");
   }
 }
+
+// Confirming reinforces the model: the embedding that triggered the suspicious
+// match gets added to that student's gallery (same as an automatic high-
+// confidence match would). Rejecting just discards it — nothing is learned
+// from a match the teacher says is wrong.
+suspiciousList.addEventListener("click", async (event) => {
+  const confirmBtn = event.target.closest(".suspicious-confirm-btn");
+  const rejectBtn  = event.target.closest(".suspicious-reject-btn");
+  const btn = confirmBtn || rejectBtn;
+  if (!btn) return;
+
+  const confirmed = !!confirmBtn;
+  const item = btn.closest(".suspicious-item");
+  const reviewId = btn.dataset.reviewId;
+  const name = item.querySelector("strong")?.textContent || "this student";
+  item.querySelectorAll("button").forEach((b) => (b.disabled = true));
+
+  try {
+    const response = await fetch("/api/attendance/suspicious/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ classroom: currentClassroomId, review_id: reviewId, confirmed }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Failed to resolve.");
+
+    item.classList.remove("suspicious-item");
+    item.classList.add(confirmed ? "present-item" : "absent-item");
+    item.innerHTML = confirmed
+      ? `<strong>${name}</strong><span>Confirmed — added to their gallery.</span>`
+      : `<strong>${name}</strong><span>Marked as not them.</span>`;
+    if (confirmed) await refreshAttendanceSummary();
+  } catch (err) {
+    alert(err.message);
+    item.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  }
+});
 
 function hideUnknownFacesUI() {
   currentUnknownFaces = [];
@@ -384,16 +512,6 @@ unknownFacesToggle.addEventListener("click", () => {
   }
 });
 
-function renderAttendanceLog(log) {
-  attendanceLogList.innerHTML = `<h3>Attendance log</h3>
-    ${log.map((e) => `<div class="result-item"><strong>${e.student_name}</strong><span>${e.recognized_at} · ${formatNumber(e.confidence)}</span></div>`).join("")}`;
-}
-
-function renderAttendanceSummary(log) {
-  attendanceLogSummary.innerHTML = `<h3>Recent attendance</h3>
-    ${log.map((e) => `<div class="result-item"><strong>${e.student_name}</strong><span>${e.recognized_at} · ${formatNumber(e.confidence)}</span></div>`).join("")}`;
-}
-
 function renderRoster(students) {
   if (!students.length) { rosterList.innerHTML = '<div class="result-item muted">No students enrolled yet.</div>'; return; }
   rosterList.innerHTML = students.map((s) => `
@@ -414,12 +532,10 @@ rosterList.addEventListener("click", async (event) => {
   if (!confirm(`Delete ${name}? This removes the student and their attendance records.`)) return;
   btn.disabled = true; btn.textContent = "Deleting...";
   try {
-    const response = await fetch(`/api/attendance/students/${encodeURIComponent(studentId)}`, { method: "DELETE" });
+    const response = await fetch(`/api/attendance/students/${encodeURIComponent(studentId)}?classroom=${encodeURIComponent(currentClassroomId)}`, { method: "DELETE" });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Delete failed.");
     renderRoster(data.students || []);
-    renderAttendanceSummary(data.attendance || []);
-    await refreshAttendanceSummary();
   } catch (err) { alert(err.message); }
   finally { btn.disabled = false; btn.textContent = "Delete"; }
 });
@@ -437,4 +553,5 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") lightbox.c
 function formatWindow(s) { const n = Number(s); return isNaN(n) ? "-" : `${n.toFixed(2)}s`; }
 function formatNumber(v) { if (v == null || isNaN(Number(v))) return "-"; return Number(v).toFixed(4); }
 
-refreshAttendanceSummary();
+loadClassrooms();
+loadEnrollClassrooms();

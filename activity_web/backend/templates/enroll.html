@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Enroll — PRISM AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="shell shell-narrow">
+      <section class="hero">
+        <p class="eyebrow">PRISM AI</p>
+        <h1>Enroll for attendance</h1>
+        <p class="lede">
+          Pick your classroom, enter your name, and provide a short face video —
+          upload a clip or record one right here. This creates the face profile
+          your teacher's attendance photos will be matched against.
+        </p>
+      </section>
+
+      <section class="panel">
+        <article class="attendance-card">
+          <form id="self-enroll-form" class="stack-form">
+            <label class="field-label">
+              Classroom
+              <select id="self-enroll-classroom" required></select>
+            </label>
+
+            <label class="field-label">
+              Your name
+              <input id="self-enroll-name" type="text" placeholder="Jane Doe" required />
+            </label>
+
+            <div style="display:flex;gap:8px;margin-bottom:4px;">
+              <button type="button" id="self-tab-files" class="tab-btn tab-active" onclick="switchSelfEnrollTab('files')">Upload files</button>
+              <button type="button" id="self-tab-camera" class="tab-btn" onclick="switchSelfEnrollTab('camera')">Record video</button>
+            </div>
+
+            <div id="self-enroll-tab-files">
+              <label class="file-drop file-drop-compact">
+                <input id="self-enroll-media-input" type="file" accept="image/*,video/*" multiple />
+                <span id="self-enroll-media-label">Choose photos or a short video</span>
+              </label>
+            </div>
+
+            <div id="self-enroll-tab-camera" style="display:none;">
+              <div id="self-enroll-camera-recorder"></div>
+            </div>
+
+            <button type="submit">Enroll me</button>
+          </form>
+
+          <div id="self-enroll-status" class="status">Ready to enroll.</div>
+          <div id="self-enroll-result" class="attendance-result hidden"></div>
+        </article>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='camera-recorder.js') }}"></script>
+    <script src="{{ url_for('static', filename='enroll.js') }}"></script>
+  </body>
+</html>

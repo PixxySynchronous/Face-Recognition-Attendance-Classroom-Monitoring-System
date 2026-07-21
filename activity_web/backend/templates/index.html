@@ -20,52 +20,21 @@
       <section class="tabs-shell">
         <div class="tabs-bar" role="tablist" aria-label="Workspace tabs">
           <button class="tab-button active" type="button" data-tab-target="attendance-tab" aria-selected="true">Attendance</button>
+          <button class="tab-button" type="button" data-tab-target="enroll-tab" aria-selected="false">Enroll Student</button>
           <button class="tab-button" type="button" data-tab-target="classroom-tab" aria-selected="false">Classroom Monitoring</button>
           <button class="tab-button" type="button" data-tab-target="how-it-works-tab" aria-selected="false">How it Works</button>
         </div>
 
         <section id="attendance-tab" class="panel tab-panel">
+          <div class="classroom-picker">
+            <label class="field-label" for="classroom-select">
+              Classroom
+              <select id="classroom-select"></select>
+            </label>
+          </div>
+
           <div class="attendance-grid">
-            <article class="attendance-card">
-              <div class="attendance-card-header">
-                <h2>Enroll student</h2>
-                <p>Upload one or more photos or a short video to create the student embedding profile.</p>
-              </div>
-
-              <form id="enroll-form" class="stack-form">
-                <label class="field-label">
-                  Student name
-                  <input id="student-name-input" name="student_name" type="text" placeholder="Jane Doe" required />
-                </label>
-
-                <div style="display:flex;gap:8px;margin-bottom:4px;">
-                  <button type="button" id="tab-files" class="tab-btn tab-active" onclick="switchEnrollTab('files')">Upload files</button>
-                  <button type="button" id="tab-folder" class="tab-btn" onclick="switchEnrollTab('folder')">From folder path</button>
-                </div>
-
-                <div id="enroll-tab-files">
-                  <label class="file-drop file-drop-compact">
-                    <input id="enroll-media-input" name="media" type="file" accept="image/*,video/*" multiple />
-                    <span id="enroll-media-label">Choose photos or videos for enrollment</span>
-                  </label>
-                </div>
-
-                <div id="enroll-tab-folder" style="display:none;">
-                  <label class="field-label">
-                    Folder path (local path to a folder of videos)
-                    <input id="enroll-folder-input" type="text" placeholder="/Users/you/jai_clips" style="font-family:monospace;" />
-                  </label>
-                  <small style="color:#888;">All .mp4 .mov .avi .mkv .webm .jpg .png files in the folder will be used.</small>
-                </div>
-
-                <button type="submit">Enroll student</button>
-              </form>
-
-              <div id="enroll-status" class="status">Ready to enroll.</div>
-              <div id="enroll-result" class="attendance-result hidden"></div>
-            </article>
-
-            <article class="attendance-card">
+            <article class="attendance-card attendance-card-wide">
               <div class="attendance-card-header">
                 <h2>Mark attendance</h2>
                 <p>Upload a classroom photo and match all detected faces against the enrolled roster.</p>
@@ -88,21 +57,82 @@
               <div id="mark-status" class="status">Ready to mark attendance.</div>
               <div id="mark-result" class="attendance-result hidden">
                 <img id="marked-photo-preview" class="marked-photo-preview" alt="Marked classroom photo" />
-                <div id="recognized-list" class="result-list"></div>
+                <div class="attendance-buckets">
+                  <div class="attendance-bucket">
+                    <div id="present-list" class="result-list"></div>
+                  </div>
+                  <div class="attendance-bucket">
+                    <div id="suspicious-list" class="result-list"></div>
+                  </div>
+                  <div class="attendance-bucket">
+                    <div id="absent-list" class="result-list"></div>
+                  </div>
+                </div>
                 <button id="unknown-faces-toggle" type="button" class="unknown-faces-toggle hidden"></button>
                 <div id="unknown-faces-grid" class="unknown-faces-grid hidden"></div>
-                <div id="attendance-log-list" class="result-list"></div>
               </div>
             </article>
 
             <article class="attendance-card attendance-card-wide">
               <div class="attendance-card-header">
-                <h2>Enrolled students</h2>
+                <h2>Enrolled students <span id="roster-classroom-label" class="roster-classroom-label"></span></h2>
                 <p>Current roster loaded from the enrolled embeddings; face detection uses InsightFace (SCRFD) and recognition uses the AdaFace IR-101 backbone.</p>
               </div>
 
               <div id="roster-list" class="roster-list"></div>
-              <div id="attendance-log-summary" class="result-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="enroll-tab" class="panel tab-panel hidden">
+          <div class="attendance-grid">
+            <article class="attendance-card attendance-card-wide">
+              <div class="attendance-card-header">
+                <h2>Enroll student</h2>
+                <p>Pick your classroom, enter a name, and upload a photo/video or record one now to create the face profile.</p>
+              </div>
+
+              <form id="enroll-form" class="stack-form">
+                <label class="field-label">
+                  Classroom
+                  <select id="enroll-classroom-select" required></select>
+                </label>
+
+                <label class="field-label">
+                  Student name
+                  <input id="student-name-input" name="student_name" type="text" placeholder="Jane Doe" required />
+                </label>
+
+                <div style="display:flex;gap:8px;margin-bottom:4px;">
+                  <button type="button" id="tab-files" class="tab-btn tab-active" onclick="switchEnrollTab('files')">Upload files</button>
+                  <button type="button" id="tab-folder" class="tab-btn" onclick="switchEnrollTab('folder')">From folder path</button>
+                  <button type="button" id="tab-camera" class="tab-btn" onclick="switchEnrollTab('camera')">Record video</button>
+                </div>
+
+                <div id="enroll-tab-files">
+                  <label class="file-drop file-drop-compact">
+                    <input id="enroll-media-input" name="media" type="file" accept="image/*,video/*" multiple />
+                    <span id="enroll-media-label">Choose photos or videos for enrollment</span>
+                  </label>
+                </div>
+
+                <div id="enroll-tab-folder" style="display:none;">
+                  <label class="field-label">
+                    Folder path (local path to a folder of videos)
+                    <input id="enroll-folder-input" type="text" placeholder="/Users/you/jai_clips" style="font-family:monospace;" />
+                  </label>
+                  <small style="color:#888;">All .mp4 .mov .avi .mkv .webm .jpg .png files in the folder will be used.</small>
+                </div>
+
+                <div id="enroll-tab-camera" style="display:none;">
+                  <div id="enroll-camera-recorder"></div>
+                </div>
+
+                <button type="submit">Enroll student</button>
+              </form>
+
+              <div id="enroll-status" class="status">Ready to enroll.</div>
+              <div id="enroll-result" class="attendance-result hidden"></div>
             </article>
           </div>
         </section>
@@ -141,9 +171,9 @@
                 <li><strong>Detection</strong> — InsightFace (SCRFD, antelopev2 detector) finds every face in the photo at 1280×1280, returning a bounding box and 5-point landmarks per face.</li>
                 <li><strong>Alignment</strong> — each face is aligned to a canonical 112×112 crop using InsightFace's <code>norm_crop</code>, based on the 5-point landmarks.</li>
                 <li><strong>Recognition</strong> — the aligned crop is embedded with <strong>AdaFace IR-101</strong> (WebFace12M), producing a 512-dimensional, L2-normalised face embedding.</li>
-                <li><strong>Matching</strong> — the embedding is compared via cosine similarity against every enrolled student's stored prototype and individual embeddings. The best match above <strong>0.28</strong> similarity is marked present; everything else is labeled Unknown.</li>
+                <li><strong>Matching</strong> — the embedding is compared via cosine similarity against every enrolled student's stored prototype and individual embeddings. The best match is bucketed into one of three tiers: below <strong>0.28</strong> similarity gets no name candidate at all ("Unknown"); <strong>0.28–0.30</strong> is a real candidate but not confident enough to auto-confirm ("Suspicious" — for a teacher to eyeball); at or above <strong>0.30</strong> is confidently "Present". Anyone enrolled in the classroom who wasn't matched at either tier is listed as "Absent".</li>
                 <li><strong>Enrollment</strong> — enrollment videos are sampled at up to 30 frames spread evenly across the clip, with an anchor-consistency check to keep only frames of the same person, plus degraded (shrunk-and-upscaled) copies of each frame so the gallery also matches small, distant classroom faces.</li>
-                <li><strong>Unknown faces</strong> — anyone below the match threshold is boxed in red as "Unknown." The "Show unknown faces" button on the Mark attendance card zooms in on each one so a teacher can review and enroll or manually mark them.</li>
+                <li><strong>Unknown faces</strong> — anyone below 0.28 is boxed in red as "Unknown." The "Show unknown faces" button on the Mark attendance card zooms in on each one so a teacher can review and enroll or manually mark them.</li>
               </ol>
               <p class="how-it-works-note">
                 AdaFace replaced the previous glintr100/antelopev2 recognition backbone after an offline evaluation showed
@@ -185,6 +215,7 @@
       <img id="lightbox-img" class="lightbox-img" alt="Full-screen marked photo" />
     </div>
 
+    <script src="{{ url_for('static', filename='camera-recorder.js') }}"></script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
   </body>
 </html>
